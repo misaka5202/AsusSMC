@@ -56,9 +56,21 @@ jobs:
       - name: Bootstrap Lilu + VirtualSMC SDKs
         run: |
           set -euo pipefail
-          # Same bootstrap the upstream Travis config uses.
+          # Same bootstrap the upstream Travis config uses. It downloads
+          # Lilu.kext and VirtualSMC.kext into the project root, which provide
+          # the Lilu headers and the VirtualSMCSDK the kext compiles against.
           src=$(/usr/bin/curl -Lfs https://raw.githubusercontent.com/hieplpvip/AsusSMC/master/Scripts/bootstrap.sh)
           eval "$src"
+
+      - name: Fetch MacKernelSDK
+        run: |
+          set -euo pipefail
+          # The Xcode project links MacKernelSDK/Library/x86_64/libkmod.a and
+          # points KERNEL_EXTENSION_HEADER_SEARCH_PATHS at MacKernelSDK/Headers,
+          # so this checkout is mandatory, not optional.
+          git clone --depth 1 https://github.com/acidanthera/MacKernelSDK
+          ls -la MacKernelSDK
+          test -f MacKernelSDK/Library/x86_64/libkmod.a
 
       - name: Build (Debug)
         run: |
