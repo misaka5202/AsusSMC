@@ -75,8 +75,14 @@ jobs:
       - name: Build (Debug)
         run: |
           set -euo pipefail
+          # ARCHS=x86_64 is mandatory. Without it Xcode falls back to
+          # "building for all applicable architectures" on the runner and
+          # tries arm64 too, where MacKernelSDK's cdefs.h/types.h abort with
+          # "Unsupported architecture". Hackintosh kexts are x86_64-only.
+          # ONLY_ACTIVE_ARCH=NO keeps that decision stable.
           xcodebuild -jobs 1 -configuration Debug \
             -project AsusSMC.xcodeproj -target AsusSMC \
+            ARCHS=x86_64 ONLY_ACTIVE_ARCH=NO \
             CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" \
             build 2>&1 | tee debug.log
 
@@ -85,6 +91,7 @@ jobs:
           set -euo pipefail
           xcodebuild -jobs 1 -configuration Release \
             -project AsusSMC.xcodeproj -target AsusSMC \
+            ARCHS=x86_64 ONLY_ACTIVE_ARCH=NO \
             CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" \
             build 2>&1 | tee release.log
 
@@ -95,7 +102,17 @@ jobs:
           test -n "$KEXT" || { echo "kext not produced"; exit 1; }
           echo "kext: $KEXT"
           plutil -p "$KEXT/Contents/Info.plist"
+
+          # Must be an x86_64-only Mach-O kext. Catch an accidental arm64
+          # or fat build here instead of at load time on the user's machine.
           file "$KEXT/Contents/MacOS/AsusSMC"
+          lipo -info "$KEXT/Contents/MacOS/AsusSMC"
+          lipo -info "$KEXT/Contents/MacOS/AsusSMC" | grep -q 'x86_64' \
+            || { echo "kext is not x86_64"; exit 1; }
+          if lipo -info "$KEXT/Contents/MacOS/AsusSMC" | grep -q 'arm64'; then
+            echo "kext unexpectedly contains arm64"; exit 1
+          fi
+
           # The fan keys must be present in the compiled binary.
           for sym in F0Ac F1Ac F0Md F0Mn F0Mx; do
             strings "$KEXT/Contents/MacOS/AsusSMC" | grep -q "$sym" \
