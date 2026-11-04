@@ -113,30 +113,53 @@ jobs:
             echo "kext unexpectedly contains arm64"; exit 1
           fi
 
-          # The fan keys must be present in the compiled binary.
-          for sym in F0Ac F1Ac F0Md F0Mn F0Mx; do
-            strings "$KEXT/Contents/MacOS/AsusSMC" | grep -q "$sym" \
-              || { echo "MISSING FAN KEY: $sym"; exit 1; }
+          # SMC_MAKE_IDENTIFIER('F','0','A','c') expands to a UINT32 built from
+          # char constants -> 0x63413046, whose little-endian bytes in memory
+          # are 46 30 41 63, i.e. the ASCII characters "F0Ac". So the key
+          # DOES appear in the binary as 4 consecutive bytes; it is just not a
+          # C string, which is why `strings` (with its min-length filter) may
+          # not surface it. Use `grep -a` on the raw file instead.
+          BIN="$KEXT/Contents/MacOS/AsusSMC"
+          for key in FNum F0Ac F1Ac F0ID F1ID F0Mn F0Mx F1Mn F1Mx F0Md F1Md; do
+            if ! grep -aq "$key" "$BIN"; then
+              echo "MISSING FAN KEY BYTES: $key"; exit 1
+            fi
           done
-          echo "fan keys present"
+          echo "all 11 fan key constants present in the binary"
+
+          # Also confirm the methods we rely on were actually linked in.
+          for m in setFanMode refreshFanAll getFanSpeed fanDevIsPresent; do
+            if ! strings "$BIN" | grep -q "$m"; then
+              echo "MISSING SYMBOL: $m"; exit 1
+            fi
+          done
+          echo "fan methods present"
+          echo "verification OK"
 
       - name: Package
+        # Run even if a later verification step fails, so the compiled kext is
+        # always retrievable. Building successfully but not getting the .kext
+        # out of CI would be pointless.
+        if: always()
         run: |
           set -euo pipefail
           OUT="$PWD/artifacts"
           mkdir -p "$OUT"
-          cd build/Release || cd build/Debug
-          zip -qry -FS "$OUT/AsusSMC-fan-Release.zip" ./*
-          cp -v SSDT-Fan.aml "$OUT/" 2>/dev/null || true
-          cd "$GITHUB_WORKSPACE"
+          KEXTDIR=$(dirname "$(find build -name "AsusSMC.kext" -maxdepth 4 | head -n 1)")
+          echo "packaging from: $KEXTDIR"
+          if [ -d "$KEXTDIR" ]; then
+            ( cd "$KEXTDIR" && zip -qry -FS "$OUT/AsusSMC-fan.zip" . )
+          fi
           cp -v ssdt/SSDT-Fan.aml "$OUT/SSDT-Fan.aml"
           ls -l "$OUT"
 
       - name: Upload artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: AsusSMC-fan
           path: artifacts/*
+          if-no-files-found: warn
 
       - name: Upload build logs
         if: always()
