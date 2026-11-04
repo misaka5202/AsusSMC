@@ -1,0 +1,208 @@
+//
+//  AsusSMC.hpp
+//  AsusSMC
+//
+//  Copyright © 2018-2020 Le Bao Hiep. All rights reserved.
+//
+
+#ifndef _AsusSMC_hpp
+#define _AsusSMC_hpp
+
+#include <IOKit/IOTimerEventSource.h>
+#include <IOKit/IOCommandGate.h>
+#include <IOKit/acpi/IOACPIPlatformDevice.h>
+#include "HIDReport.hpp"
+#include "HIDUsageTables.h"
+#include "VirtualAppleKeyboard.hpp"
+#include "KernEventServer.hpp"
+#include "KeyImplementations.hpp"
+
+#define ASUS_WMI_METHODID_DSTS         0x53545344
+#define ASUS_WMI_METHODID_DEVS         0x53564544
+#define ASUS_WMI_METHODID_INIT         0x54494E49
+#define ASUS_WMI_DEVID_ALS_ENABLE      0x00050001
+#define ASUS_WMI_DEVID_CPU_FAN_CTRL    0x00110013
+#define ASUS_WMI_DEVID_CPU_FAN2_CTRL   0x00110014
+#define ASUS_WMI_DEVID_FAN_CTRL        0x00110012
+#define ASUS_WMI_DEVID_FAN_BOOST_MODE  0x00110018
+#define ASUS_WMI_DEVID_THROTTLE_THERMAL_POLICY 0x00120075
+#define ASUS_WMI_DEVID_RSOC            0x00120057
+#define ASUS_WMI_DSTS_PRESENCE_BIT     0x00010000
+#define ASUS_WMI_UNSUPPORTED_METHOD    0xFFFFFFFE
+
+    // pwm1_enable semantics, same values as the hwmon/ASUS convention
+    enum {
+        ASUS_FAN_CTRL_FULLSPEED = 0,
+        ASUS_FAN_CTRL_MANUAL    = 1,
+        ASUS_FAN_CTRL_AUTO      = 2,
+    };
+#define ASUS_WMI_MGMT_GUID             "97845ED0-4E6D-11DE-8A39-0800200C9A66"
+
+#define kDeliverNotifications "RM,deliverNotifications"
+
+#define AsusSMCEventCode 0x8102
+
+class AsusSMC : public IOService {
+    OSDeclareDefaultStructors(AsusSMC)
+
+    VirtualSMCAPI::Plugin vsmcPlugin {
+        xStringify(PRODUCT_NAME),
+        parseModuleVersion(xStringify(MODULE_VERSION)),
+        VirtualSMCAPI::Version,
+    };
+
+public:
+    bool init(OSDictionary *dictionary) override;
+    bool start(IOService *provider) override;
+    void stop(IOService *provider) override;
+    IOService *probe(IOService *provider, SInt32 *score) override;
+    IOReturn message(uint32_t type, IOService *provider, void *argument) override;
+
+    void letSleep();
+    void toggleAirplaneMode();
+    void toggleTouchpad();
+    void toggleALS(bool state);
+    void toggleBatteryConservativeMode(bool state);
+    void displayOff();
+
+    // Called by the FMode SMC key implementation, so it has to stay public.
+    // Returns 0 on success, negative on failure (unsupported mode/device).
+    int setFanMode(uint8_t index, uint32_t mode);
+
+private:
+    struct guid_block {
+        char guid[16];
+        union {
+            char object_id[2];
+            struct {
+                uint8_t notify_id;
+                uint8_t reserved;
+            };
+        };
+        uint8_t instance_count;
+        uint8_t flags;
+    };
+
+    struct wmi_args {
+        uint32_t arg0;
+        uint32_t arg1;
+    } __packed;
+
+    enum {
+        kKeyboardSetTouchStatus = iokit_vendor_specific_msg(100), // set disable/enable touchpad (data is bool*)
+        kKeyboardGetTouchStatus = iokit_vendor_specific_msg(101), // get disable/enable touchpad (data is bool*)
+        kKeyboardKeyPressTime = iokit_vendor_specific_msg(110),   // notify of timestamp a non-modifier key was pressed (data is uint64_t*)
+    };
+
+    enum {
+        kDaemonKeyboardBacklight = 1,
+        kDaemonAirplaneMode = 2,
+        kDaemonSleep = 3,
+        kDaemonTouchpad = 4,
+    };
+
+    static constexpr uint32_t SensorUpdateTimeoutMS {1000};
+
+    static constexpr uint8_t NOTIFY_BRIGHTNESS_UP_MIN = 0x10;
+    static constexpr uint8_t NOTIFY_BRIGHTNESS_UP_MAX = 0x1F;
+
+    static constexpr uint8_t NOTIFY_BRIGHTNESS_DOWN_MIN = 0x20;
+    static constexpr uint8_t NOTIFY_BRIGHTNESS_DOWN_MAX = 0x2F;
+
+    char wmi_method[5];
+    int wmi_parse_guid(const char *in, char *out);
+    int wmi_evaluate_method(uint32_t method_id, uint32_t arg0, uint32_t arg1);
+    int wmi_get_devstate(uint32_t dev_id);
+    bool wmi_dev_is_present(uint32_t dev_id);
+    void parse_WDG();
+
+    void initATKDevice();
+    void initALSDevice();
+    void initEC0Device();
+    void initBattery();
+    void initVirtualKeyboard();
+
+    void startATKDevice();
+    
+    bool refreshALS(bool post);
+    bool refreshFan();
+
+    // --- fan telemetry / control -------------------------------------
+    // TACH() on many ASUS boards (GA503QM included) does not return RPM:
+    // it computes 0x0041CDB4 / (raw * 2), which with the raw counters these
+    // boards report yields tens of thousands of bogus RPM. So we always go
+    // through the firmware's own WMI path, ATKD.WMNB(DSTS/DEVS, dev_id),
+    // and read the value the same way asus-wmi.c does: raw * 100.
+    bool refreshFanAll();
+    bool fanDevIsPresent(uint32_t dev_id);
+    int  getFanSpeed(uint8_t index = 0);
+    bool isFanDataValid() const { return atomic_load_explicit(&fanValid, memory_order_acquire) != 0; }
+    // ----------------------------------------------------------------
+
+    void handleMessage(int code);
+
+    IOACPIPlatformDevice *atkDevice {nullptr};
+    IOACPIPlatformDevice *alsDevice {nullptr};
+    IOACPIPlatformDevice *ec0Device {nullptr};
+    VirtualAppleKeyboard *kbdDevice {nullptr};
+
+    ALSForceBits forceBits;
+    _Atomic(uint32_t) currentLux = ATOMIC_VAR_INIT(0);
+    _Atomic(uint16_t) currentFanSpeed = ATOMIC_VAR_INIT(0);
+
+    _Atomic(uint16_t) fanSpeed0 = ATOMIC_VAR_INIT(0);
+    _Atomic(uint16_t) fanSpeed1 = ATOMIC_VAR_INIT(0);
+    _Atomic(uint32_t) fanMode0  = ATOMIC_VAR_INIT(ASUS_FAN_CTRL_AUTO);
+    _Atomic(uint32_t) fanMode1  = ATOMIC_VAR_INIT(ASUS_FAN_CTRL_AUTO);
+    _Atomic(uint8_t)  fanValid  = ATOMIC_VAR_INIT(0);
+    bool isFanPresent0 {false};
+    bool isFanPresent1 {false};
+    bool isFanCtrlPresent {false};
+    bool isFanBoostPresent {false};
+    bool isThermalPolicyPresent {false};
+
+    IONotifier *vsmcNotifier {nullptr};
+
+    IOWorkLoop *workloop {nullptr};
+    IOCommandGate *command_gate {nullptr};
+    IOTimerEventSource *poller {nullptr};
+
+    KernEventServer kev;
+
+    consumer_input csmrreport;
+    apple_vendor_top_case_input tcreport;
+
+    bool directACPImessaging {false};
+    bool hasKeyboardBacklight {false};
+    bool isALSEnabled {true};
+    bool isTouchpadEnabled {true};
+    bool isPanelBackLightOn {true};
+    bool isTACHAvailable {false};
+    bool isFanProbed {false};
+    bool isBatteryRSOCAvailable {false};
+
+    uint32_t panelBrightnessLevel {16};
+    char backlightEntry[1000];
+
+    int checkBacklightEntry();
+    int findBacklightEntry();
+    void readPanelBrightnessValue();
+
+    IOReturn postKeyboardInputReport(const void *report, uint32_t reportSize);
+    void dispatchCSMRReport(int code, int loop = 1);
+    void dispatchTCReport(int code, int loop = 1);
+
+    IONotifier *_publishNotify {nullptr};
+    IONotifier *_terminateNotify {nullptr};
+    OSSet *_notificationServices {nullptr};
+    void registerNotifications(void);
+    void notificationHandlerGated(IOService *newService, IONotifier *notifier);
+    bool notificationHandler(void *refCon, IOService *newService, IONotifier *notifier);
+    void dispatchMessageGated(int *message, void *data);
+    void dispatchMessage(int message, void *data);
+
+    void registerVSMC(void);
+    static bool vsmcNotificationHandler(void *sensors, void *refCon, IOService *vsmc, IONotifier *notifier);
+};
+
+#endif //_AsusSMC_hpp

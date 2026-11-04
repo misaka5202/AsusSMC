@@ -1,0 +1,120 @@
+name: Build AsusSMC (fan support)
+
+on:
+  push:
+    branches: [ "fan-support" ]
+    tags: [ "fan-*" ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    # macos-15 is an Intel (x64) runner. AsusSMC is an x86_64 kext, and the
+    # arm64 runners cannot target x86_64 for kernel extensions cleanly, so
+    # stay on an Intel image on purpose.
+    runs-on: macos-15-intel
+    env:
+      # Keep this explicit so a silent toolchain bump cannot change results.
+      ACPICA_VERSION: "20260408"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          sw_vers
+          uname -m
+          xcodebuild -version
+          xcode-select -p
+
+      - name: Install iasl (ACPICA)
+        run: |
+          # Homebrew ships a native macOS iasl. The ACPICA GitHub "iasl"
+          # asset is a Windows PE binary, so it cannot be used here.
+          brew install acpica || brew upgrade acpica || true
+          iasl -v || /usr/local/bin/iasl -v
+
+      - name: Compile SSDT-Fan
+        run: |
+          set -euo pipefail
+          cd ssdt
+          iasl -v
+          iasl SSDT-Fan.dsl
+          test -f SSDT-Fan.aml
+          ls -l SSDT-Fan.aml
+          # Round-trip: disassemble the produced AML and confirm the methods
+          # we rely on actually made it into the table.
+          iasl -d -p roundtrip.dsl SSDT-Fan.aml
+          for m in FANQ FAN0 FAN1 FANR FSPD; do
+            grep -q "Method ($m" roundtrip.dsl || { echo "MISSING METHOD: $m"; exit 1; }
+          done
+          grep -q "0x53545344" roundtrip.dsl || { echo "missing DSTS id"; exit 1; }
+          grep -q "0x53564544" roundtrip.dsl || { echo "missing DEVS id"; exit 1; }
+          echo "SSDT round-trip OK"
+
+      - name: Bootstrap Lilu + VirtualSMC SDKs
+        run: |
+          set -euo pipefail
+          # Same bootstrap the upstream Travis config uses.
+          src=$(/usr/bin/curl -Lfs https://raw.githubusercontent.com/hieplpvip/AsusSMC/master/Scripts/bootstrap.sh)
+          eval "$src"
+
+      - name: Build (Debug)
+        run: |
+          set -euo pipefail
+          xcodebuild -jobs 1 -configuration Debug \
+            -project AsusSMC.xcodeproj -target AsusSMC \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" \
+            build 2>&1 | tee debug.log
+
+      - name: Build (Release)
+        run: |
+          set -euo pipefail
+          xcodebuild -jobs 1 -configuration Release \
+            -project AsusSMC.xcodeproj -target AsusSMC \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" \
+            build 2>&1 | tee release.log
+
+      - name: Verify kext
+        run: |
+          set -euo pipefail
+          KEXT=$(find build -name "AsusSMC.kext" -maxdepth 4 | head -n 1)
+          test -n "$KEXT" || { echo "kext not produced"; exit 1; }
+          echo "kext: $KEXT"
+          plutil -p "$KEXT/Contents/Info.plist"
+          file "$KEXT/Contents/MacOS/AsusSMC"
+          # The fan keys must be present in the compiled binary.
+          for sym in F0Ac F1Ac F0Md F0Mn F0Mx; do
+            strings "$KEXT/Contents/MacOS/AsusSMC" | grep -q "$sym" \
+              || { echo "MISSING FAN KEY: $sym"; exit 1; }
+          done
+          echo "fan keys present"
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          OUT="$PWD/artifacts"
+          mkdir -p "$OUT"
+          cd build/Release || cd build/Debug
+          zip -qry -FS "$OUT/AsusSMC-fan-Release.zip" ./*
+          cp -v SSDT-Fan.aml "$OUT/" 2>/dev/null || true
+          cd "$GITHUB_WORKSPACE"
+          cp -v ssdt/SSDT-Fan.aml "$OUT/SSDT-Fan.aml"
+          ls -l "$OUT"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: AsusSMC-fan
+          path: artifacts/*
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            debug.log
+            release.log
+          if-no-files-found: ignore
