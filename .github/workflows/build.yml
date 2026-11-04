@@ -9,10 +9,10 @@ on:
 
 jobs:
   build:
-    # macos-15 is an Intel (x64) runner. AsusSMC is an x86_64 kext, and the
-    # arm64 runners cannot target x86_64 for kernel extensions cleanly, so
-    # stay on an Intel image on purpose.
-    runs-on: macos-15-intel
+    # macos-15 (arm64) is far more available than the scarce macos-15-intel
+    # images (the Intel queue can sit for many minutes). We cross-build an
+    # x86_64 kext via ARCHS=x86_64, which Xcode supports fine.
+    runs-on: macos-15
     env:
       # Keep this explicit so a silent toolchain bump cannot change results.
       ACPICA_VERSION: "20260408"
