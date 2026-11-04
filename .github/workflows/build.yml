@@ -128,8 +128,12 @@ jobs:
           echo "all 11 fan key constants present in the binary"
 
           # Also confirm the methods we rely on were actually linked in.
+          # These are C++ symbols, so they are mangled (_ZN7AsusSMC10setFanModeEm
+          # etc) and `strings` only accepts printable runs >= 4 chars, which can
+          # hide them. Search the raw file bytes instead (verified locally:
+          # the plain names do appear in the shipped binary).
           for m in setFanMode refreshFanAll getFanSpeed fanDevIsPresent; do
-            if ! strings "$BIN" | grep -q "$m"; then
+            if ! grep -aq "$m" "$BIN"; then
               echo "MISSING SYMBOL: $m"; exit 1
             fi
           done
