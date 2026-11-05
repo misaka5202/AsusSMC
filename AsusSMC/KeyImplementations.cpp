@@ -70,6 +70,35 @@ SMC_RESULT FMode::readAccess() {
     return SmcSuccess;
 }
 
+SMC_RESULT FThermalProfile::readAccess() {
+    AsusSMC *drv = OSDynamicCast(AsusSMC, asusSMCInstance);
+    if (drv == nullptr) {
+        return SmcError;
+    }
+
+    reinterpret_cast<uint8_t *>(data)[0] = (uint8_t)(drv->getThermalProfile() & 0xff);
+    return SmcSuccess;
+}
+
+SMC_RESULT FThermalProfile::update(const SMC_DATA *src) {
+    uint8_t profile = reinterpret_cast<const uint8_t *>(src)[0];
+
+    AsusSMC *drv = OSDynamicCast(AsusSMC, asusSMCInstance);
+    if (drv == nullptr) {
+        return SmcError;
+    }
+
+    // setThermalProfile rejects anything outside 0..2 before it reaches ACPI.
+    // Returning SmcError makes the failed write visible to the caller rather
+    // than silently pretending it worked.
+    if (drv->setThermalProfile(profile) != 0) {
+        return SmcError;
+    }
+
+    reinterpret_cast<uint8_t *>(data)[0] = profile;
+    return SmcSuccess;
+}
+
 SMC_RESULT FMode::update(const SMC_DATA *src) {
     uint8_t mode = reinterpret_cast<const uint8_t *>(src)[0];
 

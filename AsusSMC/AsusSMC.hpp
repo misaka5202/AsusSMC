@@ -36,6 +36,22 @@
         ASUS_FAN_CTRL_MANUAL    = 1,
         ASUS_FAN_CTRL_AUTO      = 2,
     };
+
+    // Thermal policy (DEVS 0x00120075). These are the raw IIA1 values the
+    // DSDT switches on; it only handles 0, 1 and 2. Any other value falls
+    // through the If/ElseIf chain leaving Local0 uninitialised, which was
+    // observed to spin the fans up unpredictably on a GA503QM. The SMC key
+    // that exposes this therefore accepts ONLY 0/1/2.
+    //
+    // Measured on a GA503QM (idle, same thermal conditions):
+    //   0 (balanced) handles 2500-2900 RPM
+    //   1 (performance) 4900-5100 RPM
+    //   2 (silent)      1900-2200 RPM
+    enum {
+        ASUS_THERMAL_POLICY_BALANCED    = 0,
+        ASUS_THERMAL_POLICY_PERFORMANCE = 1,
+        ASUS_THERMAL_POLICY_SILENT      = 2,
+    };
 #define ASUS_WMI_MGMT_GUID             "97845ED0-4E6D-11DE-8A39-0800200C9A66"
 
 #define kDeliverNotifications "RM,deliverNotifications"
@@ -68,6 +84,12 @@ public:
     // Called by the FMode SMC key implementation, so it has to stay public.
     // Returns 0 on success, negative on failure (unsupported mode/device).
     int setFanMode(uint8_t index, uint32_t mode);
+
+    // Thermal profile (balanced / performance / silent). Also called from the
+    // FThermalProfile key implementation, so these must stay public too.
+    bool isThermalProfileSupported() const { return isThermalPolicyPresent; }
+    int  setThermalProfile(uint32_t profile);
+    uint32_t getThermalProfile();
 
 private:
     struct guid_block {
@@ -162,6 +184,10 @@ private:
     _Atomic(uint32_t) fanMode0  = ATOMIC_VAR_INIT(ASUS_FAN_CTRL_AUTO);
     _Atomic(uint32_t) fanMode1  = ATOMIC_VAR_INIT(ASUS_FAN_CTRL_AUTO);
     _Atomic(uint8_t)  fanValid  = ATOMIC_VAR_INIT(0);
+    // Cached thermal profile. The firmware's DSTS for 0x00120075 is a
+    // hardcoded 0x00010003 on this DSDT and does not report the live value,
+    // so we remember what we last wrote.
+    _Atomic(uint32_t) thermalProfile = ATOMIC_VAR_INIT(ASUS_THERMAL_POLICY_BALANCED);
     bool isFanPresent0 {false};
     bool isFanPresent1 {false};
     bool isFanCtrlPresent {false};

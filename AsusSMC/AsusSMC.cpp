@@ -617,6 +617,53 @@ int AsusSMC::setFanMode(uint8_t index, uint32_t mode) {
     return 0;
 }
 
+int AsusSMC::setThermalProfile(uint32_t profile) {
+    // Reject anything the DSDT does not handle. Its If/ElseIf chain only
+    // covers 0, 1 and 2; on any other value Local0 keeps its previous
+    // contents and gets written to the EC, which on a GA503QM was observed
+    // to spin both fans up to ~5000 RPM with no way to predict the result.
+    // Never let an out-of-range value reach DEVS.
+    if (profile != ASUS_THERMAL_POLICY_BALANCED &&
+        profile != ASUS_THERMAL_POLICY_PERFORMANCE &&
+        profile != ASUS_THERMAL_POLICY_SILENT) {
+        DBGLOG("fan", "setThermalProfile: refusing invalid profile %u", profile);
+        return -1;
+    }
+
+    if (!isThermalPolicyPresent) {
+        DBGLOG("fan", "setThermalProfile: 0x00120075 not present on this board");
+        return -1;
+    }
+
+    int ret = wmi_evaluate_method(ASUS_WMI_METHODID_DEVS,
+                                  ASUS_WMI_DEVID_THROTTLE_THERMAL_POLICY,
+                                  profile);
+    if (ret == -1 || ret == (int)ASUS_WMI_UNSUPPORTED_METHOD) {
+        DBGLOG("fan", "setThermalProfile: DEVS failed for profile %u", profile);
+        return -1;
+    }
+
+    // AC returns 1 on success for this device.
+    if (ret != 1) {
+        DBGLOG("fan", "setThermalProfile: unexpected DEVS result %d", ret);
+        return -1;
+    }
+
+    atomic_store_explicit(&thermalProfile, profile, memory_order_release);
+
+    DBGLOG("fan", "setThermalProfile: -> %u (silent=2 bal=0 perf=1)", profile);
+
+    return 0;
+}
+
+uint32_t AsusSMC::getThermalProfile() {
+    // The DSDT answers DSTS for 0x00120075 with a hardcoded 0x00010003 and
+    // never reports the live mode, so reading it back tells us nothing.
+    // Report what we last wrote instead; on a fresh boot that is the
+    // balanced default, which matches the firmware's own power-on state.
+    return atomic_load_explicit(&thermalProfile, memory_order_acquire);
+}
+
 void AsusSMC::handleMessage(int code) {
     switch (code) {
         case 0x57: // AC disconnected
@@ -1045,6 +1092,17 @@ void AsusSMC::registerVSMC() {
         VirtualSMCAPI::addKey(KeyF1ID, vsmcPlugin.data, VirtualSMCAPI::valueWithData(
             reinterpret_cast<const SMC_DATA *>(&desc1), sizeof(desc1), SmcKeyTypeFds, nullptr,
             SMC_KEY_ATTRIBUTE_CONST | SMC_KEY_ATTRIBUTE_READ));
+    }
+
+    // Thermal profile switch: 0 = balanced, 1 = performance, 2 = silent.
+    // This selects which of the three firmware fan curves the EC runs, so it
+    // is a single global key rather than one per fan. Named F0Tp
+    // ("fan profile") to keep it distinct from F0Md, which is per-fan
+    // full-speed/auto.
+    if (isThermalPolicyPresent) {
+        VirtualSMCAPI::addKey(KeyF0Tp, vsmcPlugin.data, VirtualSMCAPI::valueWithUint8(
+            ASUS_THERMAL_POLICY_BALANCED, new FThermalProfile(this),
+            SMC_KEY_ATTRIBUTE_READ | SMC_KEY_ATTRIBUTE_WRITE | SMC_KEY_ATTRIBUTE_FUNCTION));
     }
 
     if (isBatteryRSOCAvailable) {

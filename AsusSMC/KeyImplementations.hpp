@@ -38,6 +38,13 @@ static constexpr SMC_KEY KeyF1Mx = SMC_MAKE_IDENTIFIER('F','1','M','x');
 // pwm1_enable equivalent
 static constexpr SMC_KEY KeyF0Md = SMC_MAKE_IDENTIFIER('F','0','M','d');
 static constexpr SMC_KEY KeyF1Md = SMC_MAKE_IDENTIFIER('F','1','M','d');
+// Thermal profile selector: 0 = balanced, 1 = performance, 2 = silent.
+// This picks which firmware fan curve the EC runs, and applies to BOTH fans,
+// so it is a single key rather than one per fan. Named F0Tp ("fan profile")
+// to keep it clearly distinct from F0Md which is per-fan full-speed/auto.
+static constexpr SMC_KEY KeyF0Tp = SMC_MAKE_IDENTIFIER('F','0','T','p');
+// Human readable names, in case a tool wants to display them.
+static constexpr SMC_KEY KeyF0Pn = SMC_MAKE_IDENTIFIER('F','0','P','n');
 
 // Fan range reported to the monitoring apps. Idle is ~2300, the firmware's
 // full-speed state measured ~6800 RPM on a GA503QM, so 7600 leaves headroom.
@@ -183,6 +190,21 @@ protected:
 public:
     FMode(IOService *asusSMCInstance, uint8_t index, _Atomic(uint32_t) *currentMode) :
     currentMode(currentMode), asusSMCInstance(asusSMCInstance), index(index) {}
+};
+
+// Thermal profile selector: F0Tp.
+//   0 = balanced, 1 = performance, 2 = silent
+// Writes are validated inside the driver (setThermalProfile rejects anything
+// outside 0..2) so an out-of-range value can never reach the DSDT.
+class FThermalProfile : public VirtualSMCValue {
+    IOService *asusSMCInstance {nullptr};
+
+protected:
+    SMC_RESULT readAccess() override;
+    SMC_RESULT update(const SMC_DATA *src) override;
+
+public:
+    FThermalProfile(IOService *asusSMCInstance) : asusSMCInstance(asusSMCInstance) {}
 };
 
 class BDVT : public VirtualSMCValue {
