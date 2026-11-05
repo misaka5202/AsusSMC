@@ -27,6 +27,7 @@
 #define ASUS_WMI_DEVID_FAN_BOOST_MODE  0x00110018
 #define ASUS_WMI_DEVID_THROTTLE_THERMAL_POLICY 0x00120075
 #define ASUS_WMI_DEVID_RSOC            0x00120057
+#define ASUS_WMI_DEVID_KEYBOARD_BACKLIGHT 0x00050021
 #define ASUS_WMI_DSTS_PRESENCE_BIT     0x00010000
 #define ASUS_WMI_UNSUPPORTED_METHOD    0xFFFFFFFE
 
@@ -143,6 +144,9 @@ private:
     int wmi_evaluate_method(uint32_t method_id, uint32_t arg0, uint32_t arg1);
     int wmi_get_devstate(uint32_t dev_id);
     bool wmi_dev_is_present(uint32_t dev_id);
+    // Presence check for devices that only exist as a DEVS branch and have
+    // no DSTS (the generic 0x00050021 keyboard backlight path).
+    bool pci0Ec0HasKeyboardBacklight();
     void parse_WDG();
 
     void initATKDevice();
@@ -207,6 +211,11 @@ private:
 
     bool directACPImessaging {false};
     bool hasKeyboardBacklight {false};
+    // Some ATK DSDTs (GA503QM included) expose no SKBV method at all and route
+    // the keyboard backlight through the generic WMI device 0x00050021 ->
+    // EC0.SLKB instead. That path only exists as a DEVS branch, with no DSTS,
+    // so the level can be written but never read back.
+    bool keyboardBacklightViaWMI {false};
     bool isALSEnabled {true};
     bool isTouchpadEnabled {true};
     bool isPanelBackLightOn {true};

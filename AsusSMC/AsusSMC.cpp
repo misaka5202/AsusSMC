@@ -160,9 +160,23 @@ IOReturn AsusSMC::message(uint32_t type, IOService *provider, void *argument) {
         case kSetKeyboardBacklightMessage:
         {
             if (hasKeyboardBacklight) {
-                OSNumber *arg = OSNumber::withNumber(*((uint16_t *)argument) / 16, 16);
-                atkDevice->evaluateObject("SKBV", NULL, (OSObject **)&arg, 1);
-                arg->release();
+                // The UI works in 0..16 levels; the firmware wants 0..level.
+                uint8_t level = (uint8_t)(*((uint16_t *)argument) / 16);
+
+                if (keyboardBacklightViaWMI) {
+                    // DEVS 0x00050021 -> EC0.SLKB(level). There is no DSTS for
+                    // this device, so nothing to read back.
+                    int ret = wmi_evaluate_method(ASUS_WMI_METHODID_DEVS,
+                                                  ASUS_WMI_DEVID_KEYBOARD_BACKLIGHT,
+                                                  level);
+                    if (ret == -1 || ret == (int)ASUS_WMI_UNSUPPORTED_METHOD) {
+                        DBGLOG("kbd", "keyboard backlight DEVS failed");
+                    }
+                } else {
+                    OSNumber *arg = OSNumber::withNumber(level, 16);
+                    atkDevice->evaluateObject("SKBV", NULL, (OSObject **)&arg, 1);
+                    arg->release();
+                }
             }
             break;
         }
@@ -235,6 +249,36 @@ int AsusSMC::wmi_get_devstate(uint32_t dev_id) {
 bool AsusSMC::wmi_dev_is_present(uint32_t dev_id) {
     int status = wmi_evaluate_method(ASUS_WMI_METHODID_DSTS, dev_id, 0);
     return status != -1 && (status & ASUS_WMI_DSTS_PRESENCE_BIT);
+}
+
+/**
+ *  Detect the "generic WMI backlight" shape of the keyboard backlight.
+ *
+ *  Boards like the GA503QM have no SKBV method; their DSDT routes the
+ *  backlight through DEVS device 0x00050021 -> EC0.SLKB. That device has
+ *  no DSTS branch at all, so wmi_dev_is_present() cannot see it and asking
+ *  DSTS just returns 0xFFFFFFFE.
+ *
+ *  Presence therefore has to be established structurally: the write has to
+ *  go through ATKD.WMNB's DEVS chain, which only offers 0x00050021 when the
+ *  board implements it. We confirm by writing level 0 (backlight off) once;
+ *  on a board without the device DEVS reports unsupported and nothing
+ *  happens. Level 0 is the safe value to probe with, it cannot leave the
+ *  backlight in a surprising state.
+ */
+bool AsusSMC::pci0Ec0HasKeyboardBacklight() {
+    if (wmi_dev_is_present(ASUS_WMI_DEVID_KEYBOARD_BACKLIGHT)) {
+        return true;
+    }
+
+    int ret = wmi_evaluate_method(ASUS_WMI_METHODID_DEVS,
+                                  ASUS_WMI_DEVID_KEYBOARD_BACKLIGHT, 0);
+    if (ret == -1 || ret == (int)ASUS_WMI_UNSUPPORTED_METHOD) {
+        return false;
+    }
+
+    // DEVS on this chain answers 1 on success.
+    return ret == 1;
 }
 
 void AsusSMC::parse_WDG() {
@@ -415,15 +459,28 @@ void AsusSMC::startATKDevice() {
         directACPImessaging = true;
     }
 
-    // Check keyboard backlight support
+    // Check keyboard backlight support.
+    //
+    // Two shapes exist in the wild:
+    //   - a dedicated SKBV method (older Intel ATK DSDTs)
+    //   - the generic WMI device 0x00050021, whose DEVS branch calls
+    //     EC0.SLKB (GA503QM and similar AMD ROG boards)
+    // Only checking SKBV meant the second group was always reported as
+    // unsupported, even though the write path works.
     if (atkDevice->validateObject("SKBV") == kIOReturnSuccess) {
-        SYSLOG("atk", "Keyboard backlight is supported");
+        SYSLOG("atk", "Keyboard backlight is supported (SKBV)");
         hasKeyboardBacklight = true;
+    } else if (pci0Ec0HasKeyboardBacklight()) {
+        SYSLOG("atk", "Keyboard backlight is supported (WMI 0x%08X)",
+               ASUS_WMI_DEVID_KEYBOARD_BACKLIGHT);
+        hasKeyboardBacklight = true;
+        keyboardBacklightViaWMI = true;
     } else {
         hasKeyboardBacklight = false;
         DBGLOG("atk", "Keyboard backlight is not supported");
     }
     setProperty("IsKeyboardBacklightSupported", hasKeyboardBacklight);
+    setProperty("IsKeyboardBacklightViaWMI", keyboardBacklightViaWMI);
 
     // Turn on ALS sensor
     toggleALS(true);
