@@ -83,9 +83,16 @@ private:
         uint8_t flags;
     };
 
+    // Same layout as struct bios_args in Linux asus-wmi.c (24 bytes).
+    // Some ATK DSDTs (e.g. GA503QM) do CreateDWordField (Arg2, 0x10, IIA4) in
+    // WMNB, so the buffer must be at least 0x14 bytes or the method aborts.
     struct wmi_args {
         uint32_t arg0;
         uint32_t arg1;
+        uint32_t arg2;
+        uint32_t arg3;
+        uint32_t arg4;
+        uint32_t arg5;
     } __packed;
 
     enum {
