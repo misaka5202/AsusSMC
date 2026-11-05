@@ -149,11 +149,27 @@ jobs:
           set -euo pipefail
           OUT="$PWD/artifacts"
           mkdir -p "$OUT"
-          KEXTDIR=$(dirname "$(find build -name "AsusSMC.kext" -maxdepth 4 | head -n 1)")
-          echo "packaging from: $KEXTDIR"
-          if [ -d "$KEXTDIR" ]; then
-            ( cd "$KEXTDIR" && zip -qry -FS "$OUT/AsusSMC-fan.zip" . )
-          fi
+
+          # Ship BOTH configurations on purpose: the Debug kext is what you
+          # need to see the `probe: fan0 .. fan1 ..` messages with
+          # -asussmcdbg, and the Release kext is what you actually run.
+          for cfg in Debug Release; do
+            KEXTDIR="build/$cfg"
+            if [ -d "$KEXTDIR" ]; then
+              echo "packaging $cfg from $KEXTDIR"
+              ( cd "$KEXTDIR" && zip -qry -FS "$OUT/AsusSMC-$cfg.zip" . )
+            else
+              echo "no $cfg build present"
+            fi
+          done
+
+          # Keep a clearly named copy of the two kexts for easy swapping.
+          for cfg in Debug Release; do
+            if [ -d "build/$cfg/AsusSMC.kext" ]; then
+              ditto "build/$cfg/AsusSMC.kext" "$OUT/AsusSMC-$cfg.kext"
+            fi
+          done
+
           cp -v ssdt/SSDT-Fan.aml "$OUT/SSDT-Fan.aml"
           ls -l "$OUT"
 
