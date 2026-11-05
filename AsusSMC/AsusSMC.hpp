@@ -28,6 +28,11 @@
 #define ASUS_WMI_DEVID_THROTTLE_THERMAL_POLICY 0x00120075
 #define ASUS_WMI_DEVID_RSOC            0x00120057
 #define ASUS_WMI_DEVID_KEYBOARD_BACKLIGHT 0x00050021
+// Keyboard backlight protocol, same as Linux include/linux/platform_data/
+// x86/asus-wmi.h: the firmware has ASUS_EV_MAX_BRIGHTNESS 3, i.e. four levels
+// 0..3, and bit 7 of the control word means "light on".
+#define ASUS_KBD_BACKLIGHT_MAX      3
+#define ASUS_KBD_BACKLIGHT_ON_BIT   0x80
 #define ASUS_WMI_DSTS_PRESENCE_BIT     0x00010000
 #define ASUS_WMI_UNSUPPORTED_METHOD    0xFFFFFFFE
 

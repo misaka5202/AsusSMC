@@ -32,14 +32,21 @@ SMC_RESULT SMCKBrdBLightValue::update(const SMC_DATA *src)  {
     lkb *value = new lkb;
     lilu_os_memcpy(value, src, size);
 
-    // tval is in range [0x0, 0xffb]
+    // tval is in range [0x0, 0xffb] on Macs, which ship 16 backlight levels.
+    // This firmware has only ASUS_KBD_BACKLIGHT_MAX + 1 = 4 levels, so map
+    // the full macOS range onto 0..3 instead of passing the raw value.
     uint16_t tval = (value->val1 << 4) | (value->val2 >> 4);
-    DBGLOG("lksb", "LKSB update %d", tval);
+    uint16_t level = (uint16_t)((uint32_t)tval * ASUS_KBD_BACKLIGHT_MAX / 0xFFB);
+    if (level > ASUS_KBD_BACKLIGHT_MAX) {
+        level = ASUS_KBD_BACKLIGHT_MAX;
+    }
+
+    DBGLOG("lksb", "LKSB update %d -> level %d", tval, level);
 
     delete value;
 
     if (asusSMCInstance) {
-        asusSMCInstance->message(kSetKeyboardBacklightMessage, nullptr, &tval);
+        asusSMCInstance->message(kSetKeyboardBacklightMessage, nullptr, &level);
     }
 
     lilu_os_memcpy(data, src, size);

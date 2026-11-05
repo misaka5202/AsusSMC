@@ -160,17 +160,29 @@ IOReturn AsusSMC::message(uint32_t type, IOService *provider, void *argument) {
         case kSetKeyboardBacklightMessage:
         {
             if (hasKeyboardBacklight) {
-                // The UI works in 0..16 levels; the firmware wants 0..level.
-                uint8_t level = (uint8_t)(*((uint16_t *)argument) / 16);
+                // The caller (SMCKBrdBLightValue::update) has already mapped
+                // the macOS 0..0xFFB range onto 0..ASUS_KBD_BACKLIGHT_MAX.
+                uint8_t level = (uint8_t)(*((uint16_t *)argument));
+                if (level > ASUS_KBD_BACKLIGHT_MAX) {
+                    level = ASUS_KBD_BACKLIGHT_MAX;
+                }
 
                 if (keyboardBacklightViaWMI) {
-                    // DEVS 0x00050021 -> EC0.SLKB(level). There is no DSTS for
-                    // this device, so nothing to read back.
+                    // Matches Linux asus-wmi's kbd_led_update():
+                    //   ctrl_param = 0x80 | (level & 0x7F)
+                    //   asus_wmi_set_devstate(ASUS_WMI_DEVID_KBD_BACKLIGHT, ...)
+                    // The 0x80 bit is what EC0.SLKB tests: without it the
+                    // method takes the Else branch and forces the level to 0,
+                    // so writing a bare level does nothing at all.
+                    uint32_t ctrl = ASUS_KBD_BACKLIGHT_ON_BIT | (level & 0x7F);
+
                     int ret = wmi_evaluate_method(ASUS_WMI_METHODID_DEVS,
                                                   ASUS_WMI_DEVID_KEYBOARD_BACKLIGHT,
-                                                  level);
+                                                  ctrl);
                     if (ret == -1 || ret == (int)ASUS_WMI_UNSUPPORTED_METHOD) {
                         DBGLOG("kbd", "keyboard backlight DEVS failed");
+                    } else {
+                        DBGLOG("kbd", "keyboard backlight level %u -> 0x%X", level, ctrl);
                     }
                 } else {
                     OSNumber *arg = OSNumber::withNumber(level, 16);
@@ -261,10 +273,9 @@ bool AsusSMC::wmi_dev_is_present(uint32_t dev_id) {
  *
  *  Presence therefore has to be established structurally: the write has to
  *  go through ATKD.WMNB's DEVS chain, which only offers 0x00050021 when the
- *  board implements it. We confirm by writing level 0 (backlight off) once;
- *  on a board without the device DEVS reports unsupported and nothing
- *  happens. Level 0 is the safe value to probe with, it cannot leave the
- *  backlight in a surprising state.
+ *  board implements it. We confirm by writing "off" once; on a board without
+ *  the device DEVS reports unsupported and nothing happens. Off is the safe
+ *  value to probe with.
  */
 bool AsusSMC::pci0Ec0HasKeyboardBacklight() {
     if (wmi_dev_is_present(ASUS_WMI_DEVID_KEYBOARD_BACKLIGHT)) {
@@ -272,7 +283,8 @@ bool AsusSMC::pci0Ec0HasKeyboardBacklight() {
     }
 
     int ret = wmi_evaluate_method(ASUS_WMI_METHODID_DEVS,
-                                  ASUS_WMI_DEVID_KEYBOARD_BACKLIGHT, 0);
+                                  ASUS_WMI_DEVID_KEYBOARD_BACKLIGHT,
+                                  ASUS_KBD_BACKLIGHT_ON_BIT | 0);
     if (ret == -1 || ret == (int)ASUS_WMI_UNSUPPORTED_METHOD) {
         return false;
     }
@@ -1221,8 +1233,20 @@ EXPORT extern "C" kern_return_t ADDPR(kern_start)(kmod_info_t *, void *) {
     // This works better and increases boot speed in some cases.
     PE_parse_boot_argn("liludelay", &ADDPR(debugPrintDelay), sizeof(ADDPR(debugPrintDelay)));
     ADDPR(debugEnabled) = checkKernelArgument("-vsmcdbg") || checkKernelArgument("-asussmcdbg");
+
+    // Unconditional banner. This is a SYSLOG, not a DBGLOG, so it prints
+    // even when debugging is off. Without it there is no way to tell from the
+    // log which build actually got loaded, and no way to tell whether a
+    // missing DBGLOG means "debug is off" or "the code never ran".
+    SYSLOG("atk", "kern_start: debugEnabled=%d", ADDPR(debugEnabled) ? 1 : 0);
+
+    if (!ADDPR(debugEnabled)) {
+        SYSLOG("atk", "DBG output is OFF; add -asussmcdbg (or -vsmcdbg) to boot-args");
+    }
+
     return KERN_SUCCESS;
 }
+
 
 EXPORT extern "C" kern_return_t ADDPR(kern_stop)(kmod_info_t *, void *) {
     // It is not safe to unload VirtualSMC plugins!
