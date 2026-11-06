@@ -179,15 +179,30 @@ IOReturn AsusSMC::message(uint32_t type, IOService *provider, void *argument) {
                     int ret = wmi_evaluate_method(ASUS_WMI_METHODID_DEVS,
                                                   ASUS_WMI_DEVID_KEYBOARD_BACKLIGHT,
                                                   ctrl);
+
+                    // Record what happened. DEVS returning 1 means the DSDT
+                    // ran EC0.SLKB; anything else means it did not. Read it
+                    // back with: ioreg -rn AsusSMC -l | grep LastBacklight
+                    char rec[96];
+                    snprintf(rec, sizeof(rec), "level=%u ctrl=0x%X devsRet=%d",
+                             level, ctrl, ret);
+                    setProperty("AsusSMCLastBacklight", rec);
+
                     if (ret == -1 || ret == (int)ASUS_WMI_UNSUPPORTED_METHOD) {
-                        DBGLOG("kbd", "keyboard backlight DEVS failed");
+                        SYSLOG("kbd", "keyboard backlight DEVS failed (%d)", ret);
                     } else {
-                        DBGLOG("kbd", "keyboard backlight level %u -> 0x%X", level, ctrl);
+                        SYSLOG("kbd", "keyboard backlight %s", rec);
                     }
                 } else {
                     OSNumber *arg = OSNumber::withNumber(level, 16);
-                    atkDevice->evaluateObject("SKBV", NULL, (OSObject **)&arg, 1);
+                    IOReturn kr = atkDevice->evaluateObject("SKBV", NULL, (OSObject **)&arg, 1);
                     arg->release();
+
+                    char rec[96];
+                    snprintf(rec, sizeof(rec), "level=%u skbvRet=0x%X",
+                             level, (unsigned)kr);
+                    setProperty("AsusSMCLastBacklight", rec);
+                    SYSLOG("kbd", "keyboard backlight %s", rec);
                 }
             }
             break;
@@ -493,6 +508,31 @@ void AsusSMC::startATKDevice() {
     }
     setProperty("IsKeyboardBacklightSupported", hasKeyboardBacklight);
     setProperty("IsKeyboardBacklightViaWMI", keyboardBacklightViaWMI);
+
+    // Mirror the whole probe result into the IORegistry.
+    //
+    // Lilu's SYSLOG goes through IOLog, which does not reliably reach the
+    // unified log on current macOS, so `log show` can come back empty even
+    // when the driver is running fine. IORegistry properties always work:
+    //
+    //   ioreg -rn AsusSMC -l | grep AsusSMC
+    {
+        char probe[224];
+        snprintf(probe, sizeof(probe),
+                 "kbd=%d viaWMI=%d direct=%d tach=%d fan0=%d fan1=%d "
+                 "fanCtrl=%d boost=%d thermal=%d",
+                 hasKeyboardBacklight ? 1 : 0,
+                 keyboardBacklightViaWMI ? 1 : 0,
+                 directACPImessaging ? 1 : 0,
+                 isTACHAvailable ? 1 : 0,
+                 isFanPresent0 ? 1 : 0,
+                 isFanPresent1 ? 1 : 0,
+                 isFanCtrlPresent ? 1 : 0,
+                 isFanBoostPresent ? 1 : 0,
+                 isThermalPolicyPresent ? 1 : 0);
+        setProperty("AsusSMCProbe", probe);
+        SYSLOG("atk", "probe summary: %s", probe);
+    }
 
     // Turn on ALS sensor
     toggleALS(true);
