@@ -32,16 +32,44 @@ SMC_RESULT SMCKBrdBLightValue::update(const SMC_DATA *src)  {
     lkb *value = new lkb;
     lilu_os_memcpy(value, src, size);
 
-    // tval is in range [0x0, 0xffb] on Macs, which ship 16 backlight levels.
-    // This firmware has only ASUS_KBD_BACKLIGHT_MAX + 1 = 4 levels, so map
-    // the full macOS range onto 0..3 instead of passing the raw value.
-    uint16_t tval = (value->val1 << 4) | (value->val2 >> 4);
-    uint16_t level = (uint16_t)((uint32_t)tval * ASUS_KBD_BACKLIGHT_MAX / 0xFFB);
+    // LKSB carries the level in val1, with val2 holding flags; the default
+    // initialiser is {val1 = 0, val2 = 1}. Upstream recovered the level with
+    // tval / 16, which is consistent with val1 being the 0..16 level.
+    //
+    // An earlier revision here scaled the whole packed value against 0xFFB
+    // instead. That collapsed every slider position to level 0, which showed
+    // up as "the brightness control does nothing" and as the backlight going
+    // dark at boot - macOS writes the restored level, and the driver turned
+    // it into 0. Reverted to the val1 interpretation.
+    uint16_t packed = (value->val1 << 4) | (value->val2 >> 4);
+
+    // Stay correct for both plausible encodings: a direct 0..16 step count,
+    // or a 12-bit scale. Anything at or below 16 * 16 is the former.
+    uint32_t steps;
+    if (packed <= 16 * 16) {
+        steps = (packed + 8) / 16;
+    } else {
+        steps = ((uint32_t)packed * 16 + 2047) / 4095;
+    }
+    if (steps > 16) {
+        steps = 16;
+    }
+
+    uint16_t level = (uint16_t)((steps * ASUS_KBD_BACKLIGHT_MAX + 8) / 16);
     if (level > ASUS_KBD_BACKLIGHT_MAX) {
         level = ASUS_KBD_BACKLIGHT_MAX;
     }
 
-    DBGLOG("lksb", "LKSB update %d -> level %d", tval, level);
+    // Record the raw bytes. Without them there is no way to tell which
+    // encoding macOS actually uses:
+    //   ioreg -rn AsusSMC -l | grep AsusSMCLKSB
+    AsusSMC *inst = OSDynamicCast(AsusSMC, asusSMCInstance);
+    if (inst) {
+        inst->recordKbdWrite(value->val1, value->val2, packed, level);
+    }
+
+    DBGLOG("lksb", "LKSB update val1=%u val2=%u packed=%u -> level %u",
+           value->val1, value->val2, packed, level);
 
     delete value;
 

@@ -121,6 +121,10 @@ public:
     uint32_t getLastKbdKey() const { return lastKbdKey; }
     uint32_t getKbdKeyCount() const { return kbdKeyCount; }
 
+    // Diagnostic sink for the raw LKSB payload. Called from the SMC key
+    // implementation, which cannot write IORegistry properties itself.
+    void recordKbdWrite(uint8_t val1, uint8_t val2, uint16_t packed, uint16_t level);
+
 private:
     struct guid_block {
         char guid[16];
@@ -254,6 +258,8 @@ private:
     //   ioreg -rn AsusSMC -l | grep AsusSMCKey
     uint32_t lastKbdKey {0};
     uint32_t kbdKeyCount {0};
+    // Number of LKSB writes seen, so a stalled brightness control is obvious.
+    uint32_t kbdWriteCount {0};
     bool isALSEnabled {true};
     bool isTouchpadEnabled {true};
     bool isPanelBackLightOn {true};

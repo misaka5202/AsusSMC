@@ -396,6 +396,15 @@ int AsusSMC::sendKbdBacklightViaHID(uint8_t level) {
     return (int)kr;
 }
 
+void AsusSMC::recordKbdWrite(uint8_t val1, uint8_t val2, uint16_t packed, uint16_t level) {
+    kbdWriteCount++;
+    char rec[128];
+    snprintf(rec, sizeof(rec),
+             "val1=%u val2=%u packed=0x%X level=%u count=%u",
+             val1, val2, packed, level, (unsigned)kbdWriteCount);
+    setProperty("AsusSMCLKSB", rec);
+}
+
 void AsusSMC::parse_WDG() {
     OSObject *wdg;
     if (atkDevice->evaluateObject("_WDG", &wdg) != kIOReturnSuccess) {
@@ -620,6 +629,22 @@ void AsusSMC::startATKDevice() {
                  isThermalPolicyPresent ? 1 : 0);
         setProperty("AsusSMCProbe", probe);
         SYSLOG("atk", "probe summary: %s", probe);
+    }
+
+    // Light the keyboard at boot.
+    //
+    // Once the HID path started working, the previous build showed the
+    // keyboard going dark at startup: macOS writes its restored level to LKSB
+    // and, with the old broken mapping, that became level 0. The mapping is
+    // fixed, but a deliberate default here means the keyboard is never left
+    // dark just because the stored preference is 0. macOS may overwrite it a
+    // moment later, which is fine.
+    if (hasKeyboardBacklight) {
+        int kr = sendKbdBacklightViaHID(2);
+        char rec[96];
+        snprintf(rec, sizeof(rec), "boot default level=2 hidRet=0x%X", (unsigned)kr);
+        setProperty("AsusSMCBootBacklight", rec);
+        SYSLOG("kbd", "%s", rec);
     }
 
     // Turn on ALS sensor
