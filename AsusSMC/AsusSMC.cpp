@@ -1627,8 +1627,54 @@ void AsusSMC::registerVSMC() {
     ALSSensor sensor {ALSSensor::Type::Unknown7, true, 6, false};
     ALSSensor noSensor {ALSSensor::Type::NoSensor, false, 0, false};
     SMCALSValue::Value emptyValue;
+
+    // LKSB / LKSS contents.
+    //
+    // Neither byte is documented anywhere: upstream's defaults are {0, 1} and
+    // the struct fields are literally named unknown0/unknown1, so they are a
+    // guess. Tested on the machine: disabling AsusSMC makes the System
+    // Settings keyboard brightness control disappear entirely, which proves
+    // macOS reads these keys to decide whether to offer it. The control is
+    // then shown disabled, i.e. macOS finds the key but not an adjustable
+    // range.
+    //
+    // The working hypothesis is that the two bytes carry {current, maximum}
+    // and that a maximum of 1 means "one level", leaving nothing to adjust.
+    // The defaults are therefore raised to a 16 step range.
+    //
+    // Every byte can be overridden from boot-args, so the encoding can be
+    // swept without rebuilding:
+    //   -asussmclkb0=0 -asussmclkb1=16 -asussmclks0=0 -asussmclks1=16
     SMCKBrdBLightValue::lkb lkb;
+    lkb.val1 = 0;
+    lkb.val2 = 16;
+
     SMCKBrdBLightValue::lks lks;
+    lks.unknown0 = 0;
+    lks.unknown1 = 16;
+
+    {
+        int32_t v = 0;
+        if (PE_parse_boot_argn("asussmclkb0", &v, sizeof(v))) {
+            lkb.val1 = (uint8_t)v;
+        }
+        if (PE_parse_boot_argn("asussmclkb1", &v, sizeof(v))) {
+            lkb.val2 = (uint8_t)v;
+        }
+        if (PE_parse_boot_argn("asussmclks0", &v, sizeof(v))) {
+            lks.unknown0 = (uint8_t)v;
+        }
+        if (PE_parse_boot_argn("asussmclks1", &v, sizeof(v))) {
+            lks.unknown1 = (uint8_t)v;
+        }
+
+        char init[96];
+        snprintf(init, sizeof(init), "lkb=%u,%u lks=%u,%u",
+                 lkb.val1, lkb.val2, lks.unknown0, lks.unknown1);
+        setProperty("AsusSMCInit", init);
+        SYSLOG("kbd", "LKSB/LKSS initial values %s", init);
+    }
+
 
     VirtualSMCAPI::addKey(KeyAL, vsmcPlugin.data, VirtualSMCAPI::valueWithUint16(
         0, &forceBits,
