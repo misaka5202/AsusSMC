@@ -1308,26 +1308,77 @@ bool AsusSMC::readDisplayWranglerState(uint32_t *state) {
         }
     }
 
-    // 3. Last resort: any entry in the registry that publishes a power
-    //    management dictionary. The source name is reported so the choice can
-    //    be judged rather than trusted.
+    // 3. Last resort: walk the whole registry looking for a power management
+    //    dictionary. The source name is reported so the choice can be judged
+    //    rather than trusted, together with how many candidates were seen at
+    //    all - if this reports none seen=0 the walk itself is broken, which is
+    //    exactly what the previous version hid.
     {
         IORegistryIterator *iter =
             IORegistryIterator::iterateOver(gIOServicePlane, kIORegistryIterateRecursively);
         if (iter) {
-            bool found = false;
-            while (IOService *svc = OSDynamicCast(IOService, iter->getNextObject())) {
-                if (readPowerStateFrom(svc, state, &source)) {
-                    powerEntry = svc;
-                    found = true;
+            IOService *first = nullptr;
+            const char *firstName = nullptr;
+            uint32_t firstState = 0;
+            IOService *displayish = nullptr;
+            const char *displayishName = nullptr;
+            uint32_t displayishState = 0;
+            uint32_t seen = 0;
+
+            while (OSObject *obj = iter->getNextObject()) {
+                // The recursive walk starts at the plane root, which is not an
+                // IOService. The previous version used the cast as the loop
+                // condition, so the first such entry ended the walk and the
+                // scan reported nothing at all.
+                IOService *svc = OSDynamicCast(IOService, obj);
+                if (!svc) {
+                    continue;
+                }
+
+                uint32_t v = 0;
+                const char *n = nullptr;
+                if (!readPowerStateFrom(svc, &v, &n)) {
+                    continue;
+                }
+                seen++;
+
+                if (!first) {
+                    first = svc;
+                    firstName = n;
+                    firstState = v;
+                }
+
+                // Prefer a display related entry over the first thing that
+                // happens to answer: plenty of services carry a power
+                // management dictionary.
+                const char *nm = svc->getName();
+                if (nm && (strstr(nm, "Display") || strstr(nm, "Wrangler"))) {
+                    displayish = svc;
+                    displayishName = n;
+                    displayishState = v;
                     break;
                 }
             }
             iter->release();
-            if (found) {
-                setProperty("AsusSMCPowerSource", source ? source : "registry-scan");
+
+            char diag[96];
+            if (displayish || first) {
+                IOService *pick = displayish ? displayish : first;
+                const char *pickName = displayish ? displayishName : firstName;
+                uint32_t pickState = displayish ? displayishState : firstState;
+
+                pick->retain();
+                powerEntry = pick;
+                *state = pickState;
+
+                snprintf(diag, sizeof(diag), "%s state=%u seen=%u",
+                         pickName ? pickName : "?", pickState, seen);
+                setProperty("AsusSMCPowerSource", diag);
                 return true;
             }
+
+            snprintf(diag, sizeof(diag), "none seen=%u", seen);
+            setProperty("AsusSMCPowerSource", diag);
         }
     }
 
@@ -1675,35 +1726,13 @@ void AsusSMC::registerVSMC() {
         SYSLOG("kbd", "LKSB/LKSS initial values %s", init);
     }
 
-
-    VirtualSMCAPI::addKey(KeyAL, vsmcPlugin.data, VirtualSMCAPI::valueWithUint16(
-        0, &forceBits,
-        SMC_KEY_ATTRIBUTE_READ | SMC_KEY_ATTRIBUTE_WRITE));
-
-    VirtualSMCAPI::addKey(KeyALI0, vsmcPlugin.data, VirtualSMCAPI::valueWithData(
-        reinterpret_cast<const SMC_DATA *>(&sensor), sizeof(sensor), SmcKeyTypeAli, nullptr,
-        SMC_KEY_ATTRIBUTE_READ | SMC_KEY_ATTRIBUTE_FUNCTION));
-
-    VirtualSMCAPI::addKey(KeyALI1, vsmcPlugin.data, VirtualSMCAPI::valueWithData(
-        reinterpret_cast<const SMC_DATA *>(&noSensor), sizeof(noSensor), SmcKeyTypeAli, nullptr,
-        SMC_KEY_ATTRIBUTE_READ | SMC_KEY_ATTRIBUTE_FUNCTION));
-
-    VirtualSMCAPI::addKey(KeyALRV, vsmcPlugin.data, VirtualSMCAPI::valueWithUint16(
-        1, nullptr,
-        SMC_KEY_ATTRIBUTE_READ));
-
-    // LKSB / LKSS can be left unregistered with -asussmcnolks, and ALV0/ALV1
-    // with -asussmcnoalv.
+    // Key group switches. What was actually registered is published as
+    // AsusSMCKeys, because a boot-arg that silently fails to parse is
+    // indistinguishable from one that was never added:
     //
-    // Disabling AsusSMC makes the keyboard brightness control disappear from
-    // System Settings, so something this driver publishes is what makes macOS
-    // offer it at all. The candidates are LKSB/LKSS and ALV0/ALV1, and these
-    // two switches separate them in a single build:
-    //
-    //   boot with -asussmcnolks -> control still there? then it is the ALS keys
-    //   boot with -asussmcnoalv -> control still there? then it is LKSB/LKSS
-    //
-    // What was actually registered is published as AsusSMCKeys.
+    //   -asussmcnolks   leave LKSB and LKSS unregistered
+    //   -asussmcnoalv   leave the whole ambient light group unregistered
+    //                   (AL, ALI0, ALI1, ALRV, ALV0, ALV1)
     bool registerLKS = !checkKernelArgument("-asussmcnolks");
     bool registerALV = !checkKernelArgument("-asussmcnoalv");
 
@@ -1712,6 +1741,36 @@ void AsusSMC::registerVSMC() {
         snprintf(keys, sizeof(keys), "lks=%d alv=%d",
                  registerLKS ? 1 : 0, registerALV ? 1 : 0);
         setProperty("AsusSMCKeys", keys);
+    }
+
+    // -asussmcnoalv now covers the whole ambient light group, not just ALV0 and
+    // ALV1. The two-boot experiment showed the System Settings panel survives
+    // both switches, but AL, ALI0, ALI1 and ALRV were registered in both boots,
+    // so they were never actually separated from anything:
+    //
+    //   boot A: lks=0 alv=1  -> panel present (ALV0/1 + AL/ALI0/ALI1/ALRV)
+    //   boot B: lks=1 alv=0  -> panel present (AL/ALI0/ALI1/ALRV still on)
+    //
+    // ALI0 and ALI1 are the sensor descriptors: real MacBookPro11,4 reports
+    // ALI0 = 07000600, which is exactly what this driver's
+    // {Unknown7, true, 6, false} produces, so the panel is almost certainly
+    // driven by the presence of these keys.
+    if (registerALV) {
+        VirtualSMCAPI::addKey(KeyAL, vsmcPlugin.data, VirtualSMCAPI::valueWithUint16(
+            0, &forceBits,
+            SMC_KEY_ATTRIBUTE_READ | SMC_KEY_ATTRIBUTE_WRITE));
+
+        VirtualSMCAPI::addKey(KeyALI0, vsmcPlugin.data, VirtualSMCAPI::valueWithData(
+            reinterpret_cast<const SMC_DATA *>(&sensor), sizeof(sensor), SmcKeyTypeAli, nullptr,
+            SMC_KEY_ATTRIBUTE_READ | SMC_KEY_ATTRIBUTE_FUNCTION));
+
+        VirtualSMCAPI::addKey(KeyALI1, vsmcPlugin.data, VirtualSMCAPI::valueWithData(
+            reinterpret_cast<const SMC_DATA *>(&noSensor), sizeof(noSensor), SmcKeyTypeAli, nullptr,
+            SMC_KEY_ATTRIBUTE_READ | SMC_KEY_ATTRIBUTE_FUNCTION));
+
+        VirtualSMCAPI::addKey(KeyALRV, vsmcPlugin.data, VirtualSMCAPI::valueWithUint16(
+            1, nullptr,
+            SMC_KEY_ATTRIBUTE_READ));
     }
 
     if (registerALV) {
