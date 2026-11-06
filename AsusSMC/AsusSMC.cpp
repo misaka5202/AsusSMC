@@ -1179,9 +1179,15 @@ void AsusSMC::followDisplayPower() {
     }
 
     // Decide from the wrangler when it is readable, otherwise from the panel.
-    // Two consecutive reads are required before blanking, so that a single
+    //
+    // Measured on the machine: with the display awake CurrentPowerState is 4,
+    // and after `pmset displaysleepnow` it drops to 1 (DevicePowerState 1,
+    // CapabilityFlags 0). So the "display is not fully on" states are the low
+    // ordinals; anything at or above 2 is treated as awake.
+    //
+    // Two consecutive reads are required before blanking, so a single
     // transient value cannot turn the keyboard off.
-    bool displayOff = haveWrangler ? (wranglerState == 0)
+    bool displayOff = haveWrangler ? (wranglerState <= 1)
                                    : (panelBrightnessLevel == 0);
 
     if (displayOff) {
@@ -1203,20 +1209,39 @@ void AsusSMC::followDisplayPower() {
 }
 
 /**
- *  Read IODisplayWrangler's current power state.
+ *  Read the current display power state.
  *
- *  Reported verbatim as AsusSMCDisplayPower so the state numbering can be
- *  calibrated on the real machine instead of assumed: 0 should mean the
- *  display is asleep, but the exact ordinals are not documented.
+ *  Measured on this machine: CurrentPowerState is 4 with the display awake and
+ *  1 after `pmset displaysleepnow`.
+ *
+ *  The property is not on the IODisplayWrangler service itself - reading it
+ *  there always returned nothing, while `ioreg -r` shows the value because it
+ *  recurses. So the service is searched first, then its children.
  */
+static bool readPowerStateFrom(IOService *svc, uint32_t *state, const char **source) {
+    if (!svc) {
+        return false;
+    }
+    OSDictionary *pm = OSDynamicCast(OSDictionary, svc->getProperty("IOPowerManagement"));
+    if (!pm) {
+        return false;
+    }
+    OSNumber *cur = OSDynamicCast(OSNumber, pm->getObject("CurrentPowerState"));
+    if (!cur) {
+        return false;
+    }
+    *state = cur->unsigned32BitValue();
+    if (source) {
+        *source = svc->getName();
+    }
+    return true;
+}
+
 bool AsusSMC::readDisplayWranglerState(uint32_t *state) {
     if (!state) {
         return false;
     }
 
-    // The registry path lookup failed on the real machine: AsusSMCDisplayPower
-    // never appeared even though IODisplayWrangler is present with
-    // CurrentPowerState=4. Resolve the service by class name instead, once.
     if (!wranglerEntry) {
         OSDictionary *matching = IOService::serviceMatching("IODisplayWrangler");
         if (!matching) {
@@ -1232,15 +1257,51 @@ bool AsusSMC::readDisplayWranglerState(uint32_t *state) {
         setProperty("AsusSMCDisplayFound", svc->getName());
     }
 
-    bool ok = false;
-    if (OSDictionary *pm = OSDynamicCast(OSDictionary,
-                                         wranglerEntry->getProperty("IOPowerManagement"))) {
-        if (OSNumber *cur = OSDynamicCast(OSNumber, pm->getObject("CurrentPowerState"))) {
-            *state = cur->unsigned32BitValue();
-            ok = true;
+    const char *source = nullptr;
+
+    // 1. The wrangler itself.
+    if (readPowerStateFrom(wranglerEntry, state, &source)) {
+        setProperty("AsusSMCPowerSource", source ? source : "wrangler");
+        return true;
+    }
+
+    // 2. Its subtree. This is where the value actually lives; `ioreg -r`
+    //    shows it for exactly that reason.
+    OSIterator *iter = wranglerEntry->getChildIterator(gIOServicePlane);
+    if (iter) {
+        bool found = false;
+        while (OSObject *obj = iter->getNextObject()) {
+            IOService *child = OSDynamicCast(IOService, obj);
+            if (readPowerStateFrom(child, state, &source)) {
+                found = true;
+                break;
+            }
+            // One level deeper covers the usual layout.
+            OSIterator *sub = child ? child->getChildIterator(gIOServicePlane) : nullptr;
+            if (sub) {
+                while (OSObject *obj2 = sub->getNextObject()) {
+                    IOService *grand = OSDynamicCast(IOService, obj2);
+                    if (readPowerStateFrom(grand, state, &source)) {
+                        found = true;
+                        break;
+                    }
+                }
+                sub->release();
+            }
+            if (found) {
+                break;
+            }
+        }
+        iter->release();
+
+        if (found) {
+            setProperty("AsusSMCPowerSource", source ? source : "child");
+            return true;
         }
     }
-    return ok;
+
+    setProperty("AsusSMCPowerSource", "none");
+    return false;
 }
 
 int AsusSMC::checkBacklightEntry() {
