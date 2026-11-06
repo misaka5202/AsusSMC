@@ -125,6 +125,13 @@ public:
     // implementation, which cannot write IORegistry properties itself.
     void recordKbdWrite(uint8_t val1, uint8_t val2, uint16_t packed, uint16_t level);
 
+    // Read/write counters for LKSB (key 0) and LKSS (key 1). macOS only
+    // writes LKSB when the keyboard brightness control is actually used, so
+    // these numbers separate "the control is not wired up" from "the write
+    // was rejected".
+    void recordLKSAccess(uint32_t key, bool isWrite, uint16_t value);
+    void publishLKSAccess();
+
 private:
     struct guid_block {
         char guid[16];
@@ -260,6 +267,10 @@ private:
     uint32_t kbdKeyCount {0};
     // Number of LKSB writes seen, so a stalled brightness control is obvious.
     uint32_t kbdWriteCount {0};
+    // Per-key access counters: LKSB and LKSS, reads and writes.
+    uint32_t lksReads[2] {0, 0};
+    uint32_t lksWrites[2] {0, 0};
+    uint16_t lksLastValue {0};
     bool isALSEnabled {true};
     bool isTouchpadEnabled {true};
     bool isPanelBackLightOn {true};

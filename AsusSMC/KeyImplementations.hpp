@@ -130,6 +130,9 @@ class SMCKBrdBLightValue : public VirtualSMCValue {
 
 protected:
     SMC_RESULT update(const SMC_DATA *src) override;
+    // Reads are tracked as well: if macOS never writes LKSB, the question
+    // becomes whether it even looks at these keys.
+    SMC_RESULT readAccess() override;
 
 public:
     struct PACKED lks {
@@ -142,6 +145,22 @@ public:
     };
 
     SMCKBrdBLightValue(IOService *asusSMCInstance): asusSMCInstance(asusSMCInstance) {}
+};
+
+/**
+ *  LKSS, the keyboard backlight state/capability key.
+ *
+ *  macOS reads this to decide whether the keyboard brightness control is
+ *  usable at all, so it is instrumented separately from LKSB.
+ */
+class SMCKBrdBLightState : public VirtualSMCValue {
+    IOService *asusSMCInstance {nullptr};
+
+protected:
+    SMC_RESULT readAccess() override;
+
+public:
+    SMCKBrdBLightState(IOService *asusSMCInstance): asusSMCInstance(asusSMCInstance) {}
 };
 
 class F0Ac : public VirtualSMCValue {

@@ -405,6 +405,32 @@ void AsusSMC::recordKbdWrite(uint8_t val1, uint8_t val2, uint16_t packed, uint16
     setProperty("AsusSMCLKSB", rec);
 }
 
+void AsusSMC::recordLKSAccess(uint32_t key, bool isWrite, uint16_t value) {
+    if (key > 1) {
+        return;
+    }
+    if (isWrite) {
+        lksWrites[key]++;
+        lksLastValue = value;
+    } else {
+        lksReads[key]++;
+    }
+    publishLKSAccess();
+}
+
+void AsusSMC::publishLKSAccess() {
+    // Published even when every counter is zero, which is exactly the case
+    // that needs diagnosing: a keyboard brightness control that never touches
+    // these keys.
+    char rec[160];
+    snprintf(rec, sizeof(rec),
+             "lksbR=%u lksbW=%u lkssR=%u lkssW=%u lastW=0x%X",
+             (unsigned)lksReads[0], (unsigned)lksWrites[0],
+             (unsigned)lksReads[1], (unsigned)lksWrites[1],
+             (unsigned)lksLastValue);
+    setProperty("AsusSMCLKSAccess", rec);
+}
+
 void AsusSMC::parse_WDG() {
     OSObject *wdg;
     if (atkDevice->evaluateObject("_WDG", &wdg) != kIOReturnSuccess) {
@@ -640,6 +666,10 @@ void AsusSMC::startATKDevice() {
     // dark just because the stored preference is 0. macOS may overwrite it a
     // moment later, which is fine.
     if (hasKeyboardBacklight) {
+        // Publish the counters before anything else so a zero reading is
+        // visible rather than absent.
+        publishLKSAccess();
+
         int kr = sendKbdBacklightViaHID(2);
         char rec[96];
         snprintf(rec, sizeof(rec), "boot default level=2 hidRet=0x%X", (unsigned)kr);
@@ -1273,7 +1303,7 @@ void AsusSMC::registerVSMC() {
         SMC_KEY_ATTRIBUTE_READ | SMC_KEY_ATTRIBUTE_WRITE | SMC_KEY_ATTRIBUTE_FUNCTION));
 
     VirtualSMCAPI::addKey(KeyLKSS, vsmcPlugin.data, VirtualSMCAPI::valueWithData(
-        reinterpret_cast<const SMC_DATA *>(&lks), sizeof(lks), SmcKeyTypeLks, nullptr,
+        reinterpret_cast<const SMC_DATA *>(&lks), sizeof(lks), SmcKeyTypeLks, new SMCKBrdBLightState(this),
         SMC_KEY_ATTRIBUTE_READ | SMC_KEY_ATTRIBUTE_WRITE | SMC_KEY_ATTRIBUTE_FUNCTION));
 
     VirtualSMCAPI::addKey(KeyMSLD, vsmcPlugin.data, VirtualSMCAPI::valueWithUint8(
