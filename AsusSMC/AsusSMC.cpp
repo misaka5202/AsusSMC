@@ -1654,24 +1654,31 @@ void AsusSMC::registerVSMC() {
         reinterpret_cast<const SMC_DATA *>(&emptyValue), sizeof(emptyValue), SmcKeyTypeAlv, nullptr,
         SMC_KEY_ATTRIBUTE_READ | SMC_KEY_ATTRIBUTE_WRITE | SMC_KEY_ATTRIBUTE_FUNCTION));
 
-    // LKSB / LKSS attributes must match real hardware.
+    // LKSB / LKSS are registered read/write, not write-only.
     //
-    // The real Mac dumps show both keys with attribute byte 0x50 and the note
-    // "NOT READABLE, code 85":
-    //   LKSB  type lkb  len 2  attr 50
-    //   LKSS  type lks  len 2  attr 50
+    // A previous revision made them write-only because the real Mac dumps
+    // report "NOT READABLE, code 85" and the attribute byte there is 0x50
+    // (WRITE | FUNCTION). That was a mistake, for two reasons:
     //
-    // 0x50 is SMC_KEY_ATTRIBUTE_WRITE | SMC_KEY_ATTRIBUTE_FUNCTION, so these
-    // are write-only command keys with no read bit. Registering them with READ
-    // as well produced 0xD0 and made them readable, which is exactly where
-    // this driver diverged from the hardware.
+    //   * The System Settings keyboard brightness control is still displayed
+    //     on this machine, greyed out. A machine with no keyboard backlight at
+    //     all does not show that control, so macOS is detecting a backlight -
+    //     and LKSB/LKSS are the only such interface this driver publishes. So
+    //     macOS is looking at these keys after all.
+    //   * If macOS reads the current level to render the slider, a key that
+    //     cannot be read is exactly what would leave the slider disabled.
+    //     "NOT READABLE" in the dump may also just be the dump tool lacking
+    //     the access those keys want.
+    //
+    // Keeping READ also restores the read counters, which are the direct
+    // evidence of whether macOS touches these keys at all.
     VirtualSMCAPI::addKey(KeyLKSB, vsmcPlugin.data, VirtualSMCAPI::valueWithData(
         reinterpret_cast<const SMC_DATA *>(&lkb), sizeof(lkb), SmcKeyTypeLkb, new SMCKBrdBLightValue(this),
-        SMC_KEY_ATTRIBUTE_WRITE | SMC_KEY_ATTRIBUTE_FUNCTION));
+        SMC_KEY_ATTRIBUTE_READ | SMC_KEY_ATTRIBUTE_WRITE | SMC_KEY_ATTRIBUTE_FUNCTION));
 
     VirtualSMCAPI::addKey(KeyLKSS, vsmcPlugin.data, VirtualSMCAPI::valueWithData(
         reinterpret_cast<const SMC_DATA *>(&lks), sizeof(lks), SmcKeyTypeLks, new SMCKBrdBLightState(this),
-        SMC_KEY_ATTRIBUTE_WRITE | SMC_KEY_ATTRIBUTE_FUNCTION));
+        SMC_KEY_ATTRIBUTE_READ | SMC_KEY_ATTRIBUTE_WRITE | SMC_KEY_ATTRIBUTE_FUNCTION));
 
     VirtualSMCAPI::addKey(KeyMSLD, vsmcPlugin.data, VirtualSMCAPI::valueWithUint8(
         0, nullptr,
