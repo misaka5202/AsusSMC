@@ -130,6 +130,9 @@ public:
     // driver blanks and restores the keyboard itself.
     void followDisplayPower();
     bool findPanelEntryBySearch();
+    // IODisplayWrangler power state: GPU independent, so it is the primary
+    // signal for "is the display asleep".
+    bool readDisplayWranglerState(uint32_t *state);
 
     // Read/write counters for LKSB (key 0) and LKSS (key 1). macOS only
     // writes LKSB when the keyboard brightness control is actually used, so

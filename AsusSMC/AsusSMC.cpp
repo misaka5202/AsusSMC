@@ -1112,33 +1112,84 @@ void AsusSMC::followDisplayPower() {
         return;
     }
 
-    uint32_t previous = panelBrightnessLevel;
-    if (!readPanelBrightnessValue()) {
-        // Report it once so the situation is visible without logs.
+    // Primary signal: IODisplayWrangler, the display power manager. It is
+    // published by IOGraphicsFamily and is independent of the GPU vendor, so
+    // it works on this AMD machine where every Intel/NVIDIA registry path
+    // misses. Its power state drops to 0 when the display sleeps.
+    uint32_t wranglerState = 0;
+    bool haveWrangler = readDisplayWranglerState(&wranglerState);
+    if (haveWrangler) {
+        char dr[64];
+        snprintf(dr, sizeof(dr), "state=%u", (unsigned)wranglerState);
+        setProperty("AsusSMCDisplayPower", dr);
+    }
+
+    // Secondary signal: the panel brightness value. Kept because it reports
+    // the actual backlight level, and because one of the two may exist when
+    // the other does not.
+    bool havePanel = readPanelBrightnessValue();
+
+    bool displayOff;
+    if (haveWrangler) {
+        displayOff = (wranglerState == 0);
+    } else if (havePanel) {
+        displayOff = (panelBrightnessLevel == 0);
+    } else {
         if (!panelUnreadable) {
             panelUnreadable = true;
-            setProperty("AsusSMCPanel", "brightness=unreadable");
+            setProperty("AsusSMCPanel", "no display signal available");
         }
         return;
     }
     panelUnreadable = false;
 
-    char rec[128];
-    snprintf(rec, sizeof(rec), "brightness=%u prev=%u dimmed=%d level=%u",
-             (unsigned)panelBrightnessLevel, (unsigned)previous,
+    char rec[160];
+    snprintf(rec, sizeof(rec), "wrangler=%d brightness=%s dimmed=%d level=%u",
+             (int)wranglerState,
+             havePanel ? "read" : "unreadable",
              kbdDimmedForDisplay ? 1 : 0, (unsigned)kbdLevel);
     setProperty("AsusSMCPanel", rec);
 
-    if (panelBrightnessLevel == 0 && !kbdDimmedForDisplay) {
+    if (displayOff && !kbdDimmedForDisplay) {
         int kr = sendKbdBacklightViaHID(0);
         kbdDimmedForDisplay = true;
-        SYSLOG("kbd", "panel off -> keyboard backlight off (ret=0x%X)", (unsigned)kr);
-    } else if (panelBrightnessLevel > 0 && kbdDimmedForDisplay) {
+        SYSLOG("kbd", "display off -> keyboard backlight off (ret=0x%X)", (unsigned)kr);
+    } else if (!displayOff && kbdDimmedForDisplay) {
         int kr = sendKbdBacklightViaHID(kbdLevel);
         kbdDimmedForDisplay = false;
-        SYSLOG("kbd", "panel on -> keyboard backlight %u (ret=0x%X)",
+        SYSLOG("kbd", "display on -> keyboard backlight %u (ret=0x%X)",
                (unsigned)kbdLevel, (unsigned)kr);
     }
+}
+
+/**
+ *  Read IODisplayWrangler's current power state.
+ *
+ *  Reported verbatim as AsusSMCDisplayPower so the state numbering can be
+ *  calibrated on the real machine instead of assumed: 0 should mean the
+ *  display is asleep, but the exact ordinals are not documented.
+ */
+bool AsusSMC::readDisplayWranglerState(uint32_t *state) {
+    if (!state) {
+        return false;
+    }
+
+    IORegistryEntry *wrangler =
+        IORegistryEntry::fromPath("IOService:/IOResources/IODisplayWrangler");
+    if (!wrangler) {
+        return false;
+    }
+
+    bool ok = false;
+    if (OSDictionary *pm = OSDynamicCast(OSDictionary,
+                                         wrangler->getProperty("IOPowerManagement"))) {
+        if (OSNumber *cur = OSDynamicCast(OSNumber, pm->getObject("CurrentPowerState"))) {
+            *state = cur->unsigned32BitValue();
+            ok = true;
+        }
+    }
+    OSSafeReleaseNULL(wrangler);
+    return ok;
 }
 
 int AsusSMC::checkBacklightEntry() {
