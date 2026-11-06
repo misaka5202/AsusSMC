@@ -66,6 +66,9 @@ SMC_RESULT SMCKBrdBLightValue::update(const SMC_DATA *src)  {
     AsusSMC *inst = OSDynamicCast(AsusSMC, asusSMCInstance);
     if (inst) {
         inst->recordKbdWrite(value->val1, value->val2, packed, level);
+        // Also bump the LKSB write counter. Without this lksbW stayed at 0
+        // even when writes were arriving, so the diagnostics were lying.
+        inst->recordLKSAccess(0, true, packed);
     }
 
     DBGLOG("lksb", "LKSB update val1=%u val2=%u packed=%u -> level %u",

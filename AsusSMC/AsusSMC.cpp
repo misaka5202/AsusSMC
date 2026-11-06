@@ -170,6 +170,22 @@ IOReturn AsusSMC::message(uint32_t type, IOService *provider, void *argument) {
                     level = ASUS_KBD_BACKLIGHT_MAX;
                 }
 
+                // A level of 0 arriving here is ignored.
+                //
+                // Verified on this machine: macOS never drives LKSB, but
+                // VirtualSMC calls update() with the key's default initialiser
+                // at registration, and the default {val1 = 0, val2 = 1} maps
+                // to level 0. Acting on it turned the keyboard off at boot.
+                //
+                // The display-following path writes 0 directly when the panel
+                // sleeps, and asus-kbd can still turn the light off, so
+                // nothing is lost by not honouring a stray zero here.
+                if (level == 0) {
+                    setProperty("AsusSMCLastBacklight", "level=0 ignored (SMC path)");
+                    SYSLOG("kbd", "ignoring backlight level 0 from the SMC path");
+                    break;
+                }
+
                 // Remember it: followDisplayPower() restores this after the
                 // panel comes back.
                 kbdLevel = level;
@@ -1259,49 +1275,115 @@ bool AsusSMC::readDisplayWranglerState(uint32_t *state) {
 
     const char *source = nullptr;
 
-    // 1. The wrangler itself.
+    // 0. The entry that worked last time.
+    if (powerEntry && readPowerStateFrom(powerEntry, state, &source)) {
+        return true;
+    }
+
+    // 1. The wrangler itself, then its subtree. `ioreg -r` shows the value
+    //    under the wrangler, which is why it was assumed to be on the service.
     if (readPowerStateFrom(wranglerEntry, state, &source)) {
+        powerEntry = wranglerEntry;
         setProperty("AsusSMCPowerSource", source ? source : "wrangler");
         return true;
     }
 
-    // 2. Its subtree. This is where the value actually lives; `ioreg -r`
-    //    shows it for exactly that reason.
-    OSIterator *iter = wranglerEntry->getChildIterator(gIOServicePlane);
-    if (iter) {
-        bool found = false;
-        while (OSObject *obj = iter->getNextObject()) {
-            IOService *child = OSDynamicCast(IOService, obj);
-            if (readPowerStateFrom(child, state, &source)) {
-                found = true;
-                break;
-            }
-            // One level deeper covers the usual layout.
-            OSIterator *sub = child ? child->getChildIterator(gIOServicePlane) : nullptr;
-            if (sub) {
-                while (OSObject *obj2 = sub->getNextObject()) {
-                    IOService *grand = OSDynamicCast(IOService, obj2);
-                    if (readPowerStateFrom(grand, state, &source)) {
-                        found = true;
-                        break;
-                    }
-                }
-                sub->release();
-            }
-            if (found) {
-                break;
-            }
-        }
-        iter->release();
+    if (trySubtree(wranglerEntry, 2, state, &source)) {
+        setProperty("AsusSMCPowerSource", source ? source : "wrangler-child");
+        return true;
+    }
 
-        if (found) {
-            setProperty("AsusSMCPowerSource", source ? source : "child");
+    // 2. The display service found for the brightness value; AppleBacklightDisplay
+    //    carries the graphics properties, so it may carry the power state too.
+    if (panelEntry) {
+        IOService *panel = OSDynamicCast(IOService, panelEntry);
+        if (readPowerStateFrom(panel, state, &source)) {
+            powerEntry = panel;
+            setProperty("AsusSMCPowerSource", source ? source : "panel");
             return true;
+        }
+        if (trySubtree(panel, 1, state, &source)) {
+            setProperty("AsusSMCPowerSource", source ? source : "panel-child");
+            return true;
+        }
+    }
+
+    // 3. Last resort: any entry in the registry that publishes a power
+    //    management dictionary. The source name is reported so the choice can
+    //    be judged rather than trusted.
+    {
+        IORegistryIterator *iter =
+            IORegistryIterator::iterateOver(gIOServicePlane, kIORegistryIterateRecursively);
+        if (iter) {
+            bool found = false;
+            while (IOService *svc = OSDynamicCast(IOService, iter->getNextObject())) {
+                if (readPowerStateFrom(svc, state, &source)) {
+                    powerEntry = svc;
+                    found = true;
+                    break;
+                }
+            }
+            iter->release();
+            if (found) {
+                setProperty("AsusSMCPowerSource", source ? source : "registry-scan");
+                return true;
+            }
         }
     }
 
     setProperty("AsusSMCPowerSource", "none");
     return false;
+}
+
+/**
+ *  Walk an entry's descendants looking for a power management dictionary.
+ *  Returns the entry that answered through `source`.
+ */
+bool AsusSMC::trySubtree(IOService *root, int depth, uint32_t *state, const char **source) {
+    if (!root || depth <= 0) {
+        return false;
+    }
+
+    OSIterator *iter = root->getChildIterator(gIOServicePlane);
+    if (!iter) {
+        return false;
+    }
+    iter->reset();
+
+    IOService *child = nullptr;
+    while (OSObject *obj = iter->getNextObject()) {
+        IOService *c = OSDynamicCast(IOService, obj);
+        if (!c) {
+            continue;
+        }
+        if (readPowerStateFrom(c, state, source)) {
+            child = c;
+            break;
+        }
+    }
+    iter->release();
+
+    if (child) {
+        return true;
+    }
+
+    // Recurse one level down. The iterator cannot be reused after release, so
+    // the children are walked again.
+    OSIterator *again = root->getChildIterator(gIOServicePlane);
+    if (!again) {
+        return false;
+    }
+    again->reset();
+    bool found = false;
+    while (OSObject *obj = again->getNextObject()) {
+        IOService *c = OSDynamicCast(IOService, obj);
+        if (c && trySubtree(c, depth - 1, state, source)) {
+            found = true;
+            break;
+        }
+    }
+    again->release();
+    return found;
 }
 
 int AsusSMC::checkBacklightEntry() {

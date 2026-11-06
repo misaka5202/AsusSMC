@@ -133,6 +133,8 @@ public:
     // IODisplayWrangler power state: GPU independent, so it is the primary
     // signal for "is the display asleep".
     bool readDisplayWranglerState(uint32_t *state);
+    // Walk descendants looking for a power management dictionary.
+    bool trySubtree(IOService *root, int depth, uint32_t *state, const char **source);
 
     // Read/write counters for LKSB (key 0) and LKSS (key 1). macOS only
     // writes LKSB when the keyboard brightness control is actually used, so
@@ -303,6 +305,9 @@ private:
     IORegistryEntry *panelEntry {nullptr};
     // Cached IODisplayWrangler, resolved by class name.
     IOService *wranglerEntry {nullptr};
+    // Whichever entry actually answered with a power state, cached so the
+    // search cost is paid once.
+    IOService *powerEntry {nullptr};
     bool isALSEnabled {true};
     bool isTouchpadEnabled {true};
     bool isPanelBackLightOn {true};
