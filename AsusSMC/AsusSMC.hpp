@@ -285,8 +285,24 @@ private:
     uint8_t kbdLevel {2};
     bool kbdDimmedForDisplay {false};
     bool panelUnreadable {false};
+    // The boot-time write fails because the USB keyboard is not up yet, so it
+    // is retried from the sensor timer until it succeeds.
+    bool kbdBootApplied {false};
+    // Consecutive polls that looked like "display off"; two are required
+    // before blanking, so a single transient value cannot do it.
+    uint32_t offStreak {0};
+    // Running record of every value the display signals took. The display
+    // cannot be probed from a shell while it is asleep, so the driver keeps
+    // the history and it is read back afterwards.
+    bool traceSeen {false};
+    int traceWranglerMin {0};
+    int traceWranglerMax {0};
+    int traceBrightnessMin {-1};
+    int traceBrightnessMax {-1};
     // Cached display service that publishes IODisplayParameters.brightness.
     IORegistryEntry *panelEntry {nullptr};
+    // Cached IODisplayWrangler, resolved by class name.
+    IOService *wranglerEntry {nullptr};
     bool isALSEnabled {true};
     bool isTouchpadEnabled {true};
     bool isPanelBackLightOn {true};

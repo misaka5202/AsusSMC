@@ -382,7 +382,12 @@ int AsusSMC::sendKbdBacklightViaHID(uint8_t level) {
         return kIOReturnNotReady;
     }
 
-    uint8_t buf[16];
+    // The keyboard's report descriptor for collection 0xFF31/0x76 declares,
+    // for report id 0x5A, a 5-byte input report and a 63-byte feature report
+    // (MaxFeatureReportSize reports 64, counting the id byte). The payload is
+    // therefore padded to 64 bytes, which is also the length that is proven to
+    // work: the userspace tool drove the backlight with exactly this layout.
+    uint8_t buf[64];
     memset(buf, 0, sizeof(buf));
     buf[0] = 0x5A;   // report id
     buf[1] = 0xBA;   // command
@@ -1112,49 +1117,84 @@ void AsusSMC::followDisplayPower() {
         return;
     }
 
-    // Primary signal: IODisplayWrangler, the display power manager. It is
-    // published by IOGraphicsFamily and is independent of the GPU vendor, so
-    // it works on this AMD machine where every Intel/NVIDIA registry path
-    // misses. Its power state drops to 0 when the display sleeps.
     uint32_t wranglerState = 0;
     bool haveWrangler = readDisplayWranglerState(&wranglerState);
-    if (haveWrangler) {
-        char dr[64];
-        snprintf(dr, sizeof(dr), "state=%u", (unsigned)wranglerState);
-        setProperty("AsusSMCDisplayPower", dr);
-    }
 
-    // Secondary signal: the panel brightness value. Kept because it reports
-    // the actual backlight level, and because one of the two may exist when
-    // the other does not.
     bool havePanel = readPanelBrightnessValue();
 
-    bool displayOff;
-    if (haveWrangler) {
-        displayOff = (wranglerState == 0);
-    } else if (havePanel) {
-        displayOff = (panelBrightnessLevel == 0);
-    } else {
-        if (!panelUnreadable) {
-            panelUnreadable = true;
-            setProperty("AsusSMCPanel", "no display signal available");
+    // Retry the boot-time level. It fails at start() because AsusSMC comes up
+    // long before the USB keyboard enumerates (kIOReturnNotReady), and this is
+    // the first place where the device is reliably available.
+    if (!kbdBootApplied) {
+        if (sendKbdBacklightViaHID(kbdLevel) == kIOReturnSuccess) {
+            kbdBootApplied = true;
         }
-        return;
     }
-    panelUnreadable = false;
 
-    char rec[160];
-    snprintf(rec, sizeof(rec), "wrangler=%d brightness=%s dimmed=%d level=%u",
-             (int)wranglerState,
-             havePanel ? "read" : "unreadable",
-             kbdDimmedForDisplay ? 1 : 0, (unsigned)kbdLevel);
+    // Everything is recorded rather than acted on blindly.
+    //
+    // The display cannot be observed from a shell while it is asleep - typing
+    // to read ioreg wakes it - so the driver keeps a running record of what it
+    // saw. A single read afterwards then answers whether the signal moved at
+    // all, which is the only way to calibrate the semantics:
+    //
+    //   ioreg -rn AsusSMC -l | grep AsusSMCPanelTrace
+    if (haveWrangler) {
+        if (!traceSeen) {
+            traceWranglerMin = traceWranglerMax = wranglerState;
+            traceSeen = true;
+        } else {
+            if (wranglerState < traceWranglerMin) traceWranglerMin = wranglerState;
+            if (wranglerState > traceWranglerMax) traceWranglerMax = wranglerState;
+        }
+    }
+    if (havePanel) {
+        if (traceBrightnessMin < 0) {
+            traceBrightnessMin = traceBrightnessMax = (int)panelBrightnessLevel;
+        } else {
+            if ((int)panelBrightnessLevel < traceBrightnessMin) traceBrightnessMin = (int)panelBrightnessLevel;
+            if ((int)panelBrightnessLevel > traceBrightnessMax) traceBrightnessMax = (int)panelBrightnessLevel;
+        }
+    }
+
+    char rec[192];
+    snprintf(rec, sizeof(rec),
+             "wrangler=%u panelBrightness=%u dimmed=%d level=%u trace=%d,%d,%d,%d",
+             (unsigned)wranglerState,
+             havePanel ? (unsigned)panelBrightnessLevel : 0u,
+             kbdDimmedForDisplay ? 1 : 0,
+             (unsigned)kbdLevel,
+             traceWranglerMin, traceWranglerMax, traceBrightnessMin, traceBrightnessMax);
     setProperty("AsusSMCPanel", rec);
 
-    if (displayOff && !kbdDimmedForDisplay) {
+    char trace[128];
+    snprintf(trace, sizeof(trace), "wrangler=%d..%d brightness=%d..%d dimmed=%d",
+             traceWranglerMin, traceWranglerMax,
+             traceBrightnessMin, traceBrightnessMax,
+             kbdDimmedForDisplay ? 1 : 0);
+    setProperty("AsusSMCPanelTrace", trace);
+
+    if (!haveWrangler && !havePanel) {
+        return;
+    }
+
+    // Decide from the wrangler when it is readable, otherwise from the panel.
+    // Two consecutive reads are required before blanking, so that a single
+    // transient value cannot turn the keyboard off.
+    bool displayOff = haveWrangler ? (wranglerState == 0)
+                                   : (panelBrightnessLevel == 0);
+
+    if (displayOff) {
+        offStreak++;
+    } else {
+        offStreak = 0;
+    }
+
+    if (offStreak >= 2 && !kbdDimmedForDisplay) {
         int kr = sendKbdBacklightViaHID(0);
         kbdDimmedForDisplay = true;
         SYSLOG("kbd", "display off -> keyboard backlight off (ret=0x%X)", (unsigned)kr);
-    } else if (!displayOff && kbdDimmedForDisplay) {
+    } else if (!displayOff && kbdDimmedForDisplay && offStreak == 0) {
         int kr = sendKbdBacklightViaHID(kbdLevel);
         kbdDimmedForDisplay = false;
         SYSLOG("kbd", "display on -> keyboard backlight %u (ret=0x%X)",
@@ -1174,21 +1214,32 @@ bool AsusSMC::readDisplayWranglerState(uint32_t *state) {
         return false;
     }
 
-    IORegistryEntry *wrangler =
-        IORegistryEntry::fromPath("IOService:/IOResources/IODisplayWrangler");
-    if (!wrangler) {
-        return false;
+    // The registry path lookup failed on the real machine: AsusSMCDisplayPower
+    // never appeared even though IODisplayWrangler is present with
+    // CurrentPowerState=4. Resolve the service by class name instead, once.
+    if (!wranglerEntry) {
+        OSDictionary *matching = IOService::serviceMatching("IODisplayWrangler");
+        if (!matching) {
+            return false;
+        }
+        // waitForMatchingService hands back an owned reference.
+        IOService *svc = IOService::waitForMatchingService(matching, 100000000ULL);
+        matching->release();
+        if (!svc) {
+            return false;
+        }
+        wranglerEntry = svc;
+        setProperty("AsusSMCDisplayFound", svc->getName());
     }
 
     bool ok = false;
     if (OSDictionary *pm = OSDynamicCast(OSDictionary,
-                                         wrangler->getProperty("IOPowerManagement"))) {
+                                         wranglerEntry->getProperty("IOPowerManagement"))) {
         if (OSNumber *cur = OSDynamicCast(OSNumber, pm->getObject("CurrentPowerState"))) {
             *state = cur->unsigned32BitValue();
             ok = true;
         }
     }
-    OSSafeReleaseNULL(wrangler);
     return ok;
 }
 
