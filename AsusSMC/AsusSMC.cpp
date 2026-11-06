@@ -7,6 +7,9 @@
 
 #include "AsusSMC.hpp"
 
+#include <IOKit/hid/IOHIDDevice.h>
+#include <IOKit/IOMemoryDescriptor.h>
+
 bool ADDPR(debugEnabled) = false;
 uint32_t ADDPR(debugPrintDelay) = 0;
 
@@ -168,31 +171,34 @@ IOReturn AsusSMC::message(uint32_t type, IOService *provider, void *argument) {
                 }
 
                 if (keyboardBacklightViaWMI) {
-                    // Matches Linux asus-wmi's kbd_led_update():
-                    //   ctrl_param = 0x80 | (level & 0x7F)
-                    //   asus_wmi_set_devstate(ASUS_WMI_DEVID_KBD_BACKLIGHT, ...)
-                    // The 0x80 bit is what EC0.SLKB tests: without it the
-                    // method takes the Else branch and forces the level to 0,
-                    // so writing a bare level does nothing at all.
-                    uint32_t ctrl = ASUS_KBD_BACKLIGHT_ON_BIT | (level & 0x7F);
+                    // Preferred route: USB HID feature report. This is what
+                    // Linux (hid-asus) and Windows both use, and it is the
+                    // only path that actually reaches the EC on this board.
+                    int hidRet = sendKbdBacklightViaHID(level);
 
+                    char rec[160];
+                    if (hidRet == kIOReturnSuccess) {
+                        snprintf(rec, sizeof(rec),
+                                 "level=%u path=HID ok", level);
+                        setProperty("AsusSMCLastBacklight", rec);
+                        SYSLOG("kbd", "keyboard backlight %s", rec);
+                        break;
+                    }
+
+                    // Fall back to ACPI. Matches Linux asus-wmi's
+                    // kbd_led_update(): ctrl_param = 0x80 | (level & 0x7F).
+                    // The 0x80 bit is what EC0.SLKB tests; it is expected to be
+                    // a no-op on this DSDT, but keep it for other boards.
+                    uint32_t ctrl = ASUS_KBD_BACKLIGHT_ON_BIT | (level & 0x7F);
                     int ret = wmi_evaluate_method(ASUS_WMI_METHODID_DEVS,
                                                   ASUS_WMI_DEVID_KEYBOARD_BACKLIGHT,
                                                   ctrl);
 
-                    // Record what happened. DEVS returning 1 means the DSDT
-                    // ran EC0.SLKB; anything else means it did not. Read it
-                    // back with: ioreg -rn AsusSMC -l | grep LastBacklight
-                    char rec[96];
-                    snprintf(rec, sizeof(rec), "level=%u ctrl=0x%X devsRet=%d",
-                             level, ctrl, ret);
+                    snprintf(rec, sizeof(rec),
+                             "level=%u path=ACPI hidRet=0x%X ctrl=0x%X devsRet=%d",
+                             level, (unsigned)hidRet, ctrl, ret);
                     setProperty("AsusSMCLastBacklight", rec);
-
-                    if (ret == -1 || ret == (int)ASUS_WMI_UNSUPPORTED_METHOD) {
-                        SYSLOG("kbd", "keyboard backlight DEVS failed (%d)", ret);
-                    } else {
-                        SYSLOG("kbd", "keyboard backlight %s", rec);
-                    }
+                    SYSLOG("kbd", "keyboard backlight %s", rec);
                 } else {
                     OSNumber *arg = OSNumber::withNumber(level, 16);
                     IOReturn kr = atkDevice->evaluateObject("SKBV", NULL, (OSObject **)&arg, 1);
@@ -292,8 +298,7 @@ bool AsusSMC::wmi_dev_is_present(uint32_t dev_id) {
  *  the device DEVS reports unsupported and nothing happens. Off is the safe
  *  value to probe with.
  */
-bool AsusSMC::pci0Ec0HasKeyboardBacklight() {
-    if (wmi_dev_is_present(ASUS_WMI_DEVID_KEYBOARD_BACKLIGHT)) {
+bool AsusSMC::pci0Ec0HasKeyboardBacklight() {    if (wmi_dev_is_present(ASUS_WMI_DEVID_KEYBOARD_BACKLIGHT)) {
         return true;
     }
 
@@ -306,6 +311,89 @@ bool AsusSMC::pci0Ec0HasKeyboardBacklight() {
 
     // DEVS on this chain answers 1 on success.
     return ret == 1;
+}
+
+/**
+ *  Locate the ASUS keyboard's HID device.
+ *
+ *  The backlight cannot be reached over ACPI on this board (EC0.SLKB is a
+ *  no-op), so the level has to go out as a USB HID feature report. Feature
+ *  reports travel over the control endpoint, which is device wide, so any of
+ *  the keyboard's HID interfaces will do - matching on the vendor id alone is
+ *  enough and avoids depending on which collection happens to carry 0xFF31.
+ *
+ *  Resolution is lazy and retried: this driver matches an ACPI device, which
+ *  is up long before the USB keyboard enumerates.
+ */
+bool AsusSMC::ensureKbdHIDDevice() {
+    if (kbdHIDDevice) {
+        return true;
+    }
+
+    OSDictionary *matching = IOService::serviceMatching("IOHIDDevice");
+    if (!matching) {
+        return false;
+    }
+
+    OSNumber *vid = OSNumber::withNumber((unsigned long long)ASUS_USB_VENDOR_ID, 32);
+    if (vid) {
+        matching->setObject("VendorID", vid);
+        vid->release();
+    }
+
+    // Short timeout: this can be called from the SMC write path.
+    IOService *svc = IOService::waitForMatchingService(matching, 100000000ULL /* 100 ms */);
+    matching->release();
+
+    if (!svc) {
+        return false;
+    }
+
+    IOHIDDevice *hid = OSDynamicCast(IOHIDDevice, svc);
+    if (hid) {
+        hid->retain();
+        kbdHIDDevice = hid;
+        SYSLOG("kbd", "keyboard HID device found: %s", svc->getName());
+    }
+    svc->release();
+
+    return kbdHIDDevice != nullptr;
+}
+
+/**
+ *  Send the backlight feature report.
+ *
+ *  Layout matches drivers/hid/hid-asus.c asus_kbd_set_brightness():
+ *    5A BA C5 C4 <level>   padded to 16 bytes
+ *  and ROG-HID, which sends the same buffer through DriverKit.
+ *
+ *  @return kIOReturnSuccess when the report left the machine.
+ */
+int AsusSMC::sendKbdBacklightViaHID(uint8_t level) {
+    if (!ensureKbdHIDDevice()) {
+        return kIOReturnNotReady;
+    }
+
+    uint8_t buf[16];
+    memset(buf, 0, sizeof(buf));
+    buf[0] = 0x5A;   // report id
+    buf[1] = 0xBA;   // command
+    buf[2] = 0xC5;   // illumination down
+    buf[3] = 0xC4;   // illumination up
+    buf[4] = level;
+
+    IOBufferMemoryDescriptor *report =
+        IOBufferMemoryDescriptor::withBytes(buf, sizeof(buf), kIODirectionOut);
+    if (!report) {
+        return kIOReturnNoMemory;
+    }
+
+    // The report id also goes in the low 8 bits of options; this is how
+    // IOHIDDevice::setReport is documented.
+    IOReturn kr = kbdHIDDevice->setReport(report, kIOHIDReportTypeFeature, 0x5A);
+    report->release();
+
+    return (int)kr;
 }
 
 void AsusSMC::parse_WDG() {
@@ -774,6 +862,26 @@ uint32_t AsusSMC::getThermalProfile() {
 }
 
 void AsusSMC::handleMessage(int code) {
+    // Record every notification that reaches us.
+    //
+    // This answers a question the DSDT analysis cannot: the illumination keys
+    // (0xC4 / 0xC5) are only produced by EC0.KBLD / KBLU, and those are called
+    // exclusively from the DEVS 0x00100021 branch, i.e. they fire when a
+    // driver tells ACPI about the key - not when the EC sees it. So the Fn
+    // brightness keys very likely never reach this method as ACPI events, but
+    // that is worth confirming on the real machine:
+    //
+    //   ioreg -rn AsusSMC -l | grep AsusSMCKey
+    //   (press Fn+F2 / Fn+F3 first)
+    lastKbdKey = (uint32_t)code;
+    kbdKeyCount++;
+    {
+        char rec[64];
+        snprintf(rec, sizeof(rec), "last=0x%X count=%u", (unsigned)code,
+                 (unsigned)kbdKeyCount);
+        setProperty("AsusSMCKey", rec);
+    }
+
     switch (code) {
         case 0x57: // AC disconnected
         case 0x58: // AC connected

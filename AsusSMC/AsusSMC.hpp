@@ -33,6 +33,8 @@
 // 0..3, and bit 7 of the control word means "light on".
 #define ASUS_KBD_BACKLIGHT_MAX      3
 #define ASUS_KBD_BACKLIGHT_ON_BIT   0x80
+// USB vendor id of the keyboard, needed to find its IOHIDDevice.
+#define ASUS_USB_VENDOR_ID          0x0B05
 #define ASUS_WMI_DSTS_PRESENCE_BIT     0x00010000
 #define ASUS_WMI_UNSUPPORTED_METHOD    0xFFFFFFFE
 
@@ -63,6 +65,10 @@
 #define kDeliverNotifications "RM,deliverNotifications"
 
 #define AsusSMCEventCode 0x8102
+
+// Kernel HID device, used for the keyboard backlight feature report. Only a
+// pointer is stored here, so a forward declaration is enough.
+class IOHIDDevice;
 
 class AsusSMC : public IOService {
     OSDeclareDefaultStructors(AsusSMC)
@@ -96,6 +102,24 @@ public:
     bool isThermalProfileSupported() const { return isThermalPolicyPresent; }
     int  setThermalProfile(uint32_t profile);
     uint32_t getThermalProfile();
+
+    // Keyboard backlight over USB HID.
+    //
+    // The ACPI route for the backlight is a dead end on this board: the DSDT's
+    // EC0.SLKB computes a level into a local and never uses it, so writing
+    // DEVS 0x00050021 changes nothing. The firmware only reacts to a HID
+    // feature report:
+    //
+    //   report id 0x5A, first bytes 5A BA C5 C4 <level>
+    //
+    // IOHIDDevice::setReport is a kernel API, so the kext can drive it
+    // directly and macOS's own keyboard-brightness control then works. These
+    // are public because SMCKBrdBLightValue calls them.
+    bool ensureKbdHIDDevice();
+    int  sendKbdBacklightViaHID(uint8_t level);
+
+    uint32_t getLastKbdKey() const { return lastKbdKey; }
+    uint32_t getKbdKeyCount() const { return kbdKeyCount; }
 
 private:
     struct guid_block {
@@ -221,6 +245,15 @@ private:
     // EC0.SLKB instead. That path only exists as a DEVS branch, with no DSTS,
     // so the level can be written but never read back.
     bool keyboardBacklightViaWMI {false};
+    // The ASUS vendor HID interface, used to write the backlight feature
+    // report. Resolved lazily because the keyboard is enumerated by USB well
+    // after the ACPI device this driver matches on.
+    IOHIDDevice *kbdHIDDevice {nullptr};
+    // Diagnostics: the EC raises many notifications and we need to know which
+    // ones actually arrive on macOS. Read back with
+    //   ioreg -rn AsusSMC -l | grep AsusSMCKey
+    uint32_t lastKbdKey {0};
+    uint32_t kbdKeyCount {0};
     bool isALSEnabled {true};
     bool isTouchpadEnabled {true};
     bool isPanelBackLightOn {true};
