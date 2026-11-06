@@ -18,6 +18,12 @@
 	<string>$(MODULE_VERSION)</string>
 	<key>CFBundleVersion</key>
 	<string>$(MODULE_VERSION)</string>
+	<!-- Build variant marker. CFBundleVersion must be digits and dots only,
+	     so it cannot carry a "debug" suffix; this key is the reliable way to
+	     tell which build is loaded. Read it back with:
+	       plutil -p /path/AsusSMC.kext/Contents/Info.plist | grep AsusSMCVariant -->
+	<key>AsusSMCVariant</key>
+	<string>$(CONFIGURATION)</string>
 	<key>IOKitPersonalities</key>
 	<dict>
 		<key>AsusSMC</key>
