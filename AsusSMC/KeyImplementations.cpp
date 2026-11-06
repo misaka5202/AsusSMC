@@ -97,6 +97,14 @@ SMC_RESULT SMCKBrdBLightState::readAccess() {
     return VirtualSMCValue::readAccess();
 }
 
+SMC_RESULT SMCKBrdBLightState::update(const SMC_DATA *src) {
+    AsusSMC *inst = OSDynamicCast(AsusSMC, asusSMCInstance);
+    if (inst && src && size >= 1) {
+        inst->recordLKSAccess(1, true, (uint16_t)src[0]);
+    }
+    return VirtualSMCValue::update(src);
+}
+
 SMC_RESULT F0Ac::readAccess() {
     uint16_t speed = atomic_load_explicit(currentSpeed, memory_order_acquire);
     *reinterpret_cast<uint16_t *>(data) = VirtualSMCAPI::encodeIntFp(SmcKeyTypeFpe2, speed);

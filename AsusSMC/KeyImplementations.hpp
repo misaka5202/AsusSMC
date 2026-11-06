@@ -158,6 +158,9 @@ class SMCKBrdBLightState : public VirtualSMCValue {
 
 protected:
     SMC_RESULT readAccess() override;
+    // Writes are counted as well: if macOS drives the keyboard backlight
+    // through LKSS instead of LKSB, this is where it would show up.
+    SMC_RESULT update(const SMC_DATA *src) override;
 
 public:
     SMCKBrdBLightState(IOService *asusSMCInstance): asusSMCInstance(asusSMCInstance) {}

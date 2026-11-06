@@ -1460,13 +1460,24 @@ void AsusSMC::registerVSMC() {
         reinterpret_cast<const SMC_DATA *>(&emptyValue), sizeof(emptyValue), SmcKeyTypeAlv, nullptr,
         SMC_KEY_ATTRIBUTE_READ | SMC_KEY_ATTRIBUTE_WRITE | SMC_KEY_ATTRIBUTE_FUNCTION));
 
+    // LKSB / LKSS attributes must match real hardware.
+    //
+    // The real Mac dumps show both keys with attribute byte 0x50 and the note
+    // "NOT READABLE, code 85":
+    //   LKSB  type lkb  len 2  attr 50
+    //   LKSS  type lks  len 2  attr 50
+    //
+    // 0x50 is SMC_KEY_ATTRIBUTE_WRITE | SMC_KEY_ATTRIBUTE_FUNCTION, so these
+    // are write-only command keys with no read bit. Registering them with READ
+    // as well produced 0xD0 and made them readable, which is exactly where
+    // this driver diverged from the hardware.
     VirtualSMCAPI::addKey(KeyLKSB, vsmcPlugin.data, VirtualSMCAPI::valueWithData(
         reinterpret_cast<const SMC_DATA *>(&lkb), sizeof(lkb), SmcKeyTypeLkb, new SMCKBrdBLightValue(this),
-        SMC_KEY_ATTRIBUTE_READ | SMC_KEY_ATTRIBUTE_WRITE | SMC_KEY_ATTRIBUTE_FUNCTION));
+        SMC_KEY_ATTRIBUTE_WRITE | SMC_KEY_ATTRIBUTE_FUNCTION));
 
     VirtualSMCAPI::addKey(KeyLKSS, vsmcPlugin.data, VirtualSMCAPI::valueWithData(
         reinterpret_cast<const SMC_DATA *>(&lks), sizeof(lks), SmcKeyTypeLks, new SMCKBrdBLightState(this),
-        SMC_KEY_ATTRIBUTE_READ | SMC_KEY_ATTRIBUTE_WRITE | SMC_KEY_ATTRIBUTE_FUNCTION));
+        SMC_KEY_ATTRIBUTE_WRITE | SMC_KEY_ATTRIBUTE_FUNCTION));
 
     VirtualSMCAPI::addKey(KeyMSLD, vsmcPlugin.data, VirtualSMCAPI::valueWithUint8(
         0, nullptr,
