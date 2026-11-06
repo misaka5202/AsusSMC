@@ -125,6 +125,12 @@ public:
     // implementation, which cannot write IORegistry properties itself.
     void recordKbdWrite(uint8_t val1, uint8_t val2, uint16_t packed, uint16_t level);
 
+    // Keyboard backlight following the display power state. macOS does not do
+    // this on this model (see the comment on the implementation), so the
+    // driver blanks and restores the keyboard itself.
+    void followDisplayPower();
+    bool findPanelEntryBySearch();
+
     // Read/write counters for LKSB (key 0) and LKSS (key 1). macOS only
     // writes LKSB when the keyboard brightness control is actually used, so
     // these numbers separate "the control is not wired up" from "the write
@@ -271,6 +277,13 @@ private:
     uint32_t lksReads[2] {0, 0};
     uint32_t lksWrites[2] {0, 0};
     uint16_t lksLastValue {0};
+    // Keyboard backlight level to restore after the panel comes back, and
+    // whether we are the ones who blanked it.
+    uint8_t kbdLevel {2};
+    bool kbdDimmedForDisplay {false};
+    bool panelUnreadable {false};
+    // Cached display service that publishes IODisplayParameters.brightness.
+    IORegistryEntry *panelEntry {nullptr};
     bool isALSEnabled {true};
     bool isTouchpadEnabled {true};
     bool isPanelBackLightOn {true};
@@ -283,7 +296,10 @@ private:
 
     int checkBacklightEntry();
     int findBacklightEntry();
-    void readPanelBrightnessValue();
+    // Returns false when the panel brightness could not be read at all, which
+    // is the normal case on an AMD GPU whose service is not at the hard-coded
+    // Intel/NVIDIA paths.
+    bool readPanelBrightnessValue();
 
     IOReturn postKeyboardInputReport(const void *report, uint32_t reportSize);
     void dispatchCSMRReport(int code, int loop = 1);

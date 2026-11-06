@@ -170,6 +170,14 @@ IOReturn AsusSMC::message(uint32_t type, IOService *provider, void *argument) {
                     level = ASUS_KBD_BACKLIGHT_MAX;
                 }
 
+                // Remember it: followDisplayPower() restores this after the
+                // panel comes back.
+                kbdLevel = level;
+
+                // A request from the system while the panel is dark means the
+                // two are no longer in sync; let the next poll decide.
+                kbdDimmedForDisplay = false;
+
                 if (keyboardBacklightViaWMI) {
                     // Preferred route: USB HID feature report. This is what
                     // Linux (hid-asus) and Windows both use, and it is the
@@ -1085,6 +1093,54 @@ void AsusSMC::displayOff() {
     isPanelBackLightOn = !isPanelBackLightOn;
 }
 
+/**
+ *  Keep the keyboard backlight in step with the panel.
+ *
+ *  macOS will not do this for us on this machine. Its keyboard-brightness
+ *  support is per-model, and the SMC dumps show LKSB/LKSS only on 2015 and
+ *  older Macs - the 2016 top-case generation moved keyboard backlight off the
+ *  SMC entirely. This driver reports SMBIOS MacBookPro16,2 (2020), so macOS
+ *  never touches LKSB and therefore never blanks the keyboard when the screen
+ *  goes off. The result is a keyboard that stays lit through display sleep.
+ *
+ *  Polled from the existing sensor timer rather than hooked into power
+ *  management, which keeps the change contained: we only ever call the HID
+ *  write path that is already proven to work.
+ */
+void AsusSMC::followDisplayPower() {
+    if (!hasKeyboardBacklight) {
+        return;
+    }
+
+    uint32_t previous = panelBrightnessLevel;
+    if (!readPanelBrightnessValue()) {
+        // Report it once so the situation is visible without logs.
+        if (!panelUnreadable) {
+            panelUnreadable = true;
+            setProperty("AsusSMCPanel", "brightness=unreadable");
+        }
+        return;
+    }
+    panelUnreadable = false;
+
+    char rec[128];
+    snprintf(rec, sizeof(rec), "brightness=%u prev=%u dimmed=%d level=%u",
+             (unsigned)panelBrightnessLevel, (unsigned)previous,
+             kbdDimmedForDisplay ? 1 : 0, (unsigned)kbdLevel);
+    setProperty("AsusSMCPanel", rec);
+
+    if (panelBrightnessLevel == 0 && !kbdDimmedForDisplay) {
+        int kr = sendKbdBacklightViaHID(0);
+        kbdDimmedForDisplay = true;
+        SYSLOG("kbd", "panel off -> keyboard backlight off (ret=0x%X)", (unsigned)kr);
+    } else if (panelBrightnessLevel > 0 && kbdDimmedForDisplay) {
+        int kr = sendKbdBacklightViaHID(kbdLevel);
+        kbdDimmedForDisplay = false;
+        SYSLOG("kbd", "panel on -> keyboard backlight %u (ret=0x%X)",
+               (unsigned)kbdLevel, (unsigned)kr);
+    }
+}
+
 int AsusSMC::checkBacklightEntry() {
     if (IORegistryEntry *bkl = IORegistryEntry::fromPath(backlightEntry)) {
         OSSafeReleaseNULL(bkl);
@@ -1147,19 +1203,31 @@ int AsusSMC::findBacklightEntry() {
     return 0;
 }
 
-void AsusSMC::readPanelBrightnessValue() {
+bool AsusSMC::readPanelBrightnessValue() {
     if (!findBacklightEntry()) {
         DBGLOG("atk", "GPU device not found");
-        return;
+        // The static paths above are Intel and NVIDIA specific. On an AMD
+        // machine (this GA503QM with NootedRed) they all miss, so fall back
+        // to searching the registry for whichever service actually publishes
+        // the display brightness.
+        if (!findPanelEntryBySearch()) {
+            return false;
+        }
     }
 
     IORegistryEntry *displayDeviceEntry = IORegistryEntry::fromPath(backlightEntry);
+    if (!displayDeviceEntry && panelEntry) {
+        displayDeviceEntry = panelEntry;
+        displayDeviceEntry->retain();
+    }
 
+    bool ok = false;
     if (displayDeviceEntry) {
         if (OSDictionary *ioDisplayParaDict = OSDynamicCast(OSDictionary, displayDeviceEntry->getProperty("IODisplayParameters"))) {
             if (OSDictionary *brightnessDict = OSDynamicCast(OSDictionary, ioDisplayParaDict->getObject("brightness"))) {
                 if (OSNumber *brightnessValue = OSDynamicCast(OSNumber, brightnessDict->getObject("value"))) {
                     panelBrightnessLevel = brightnessValue->unsigned32BitValue() / 64;
+                    ok = true;
                     DBGLOG("atk", "Panel brightness level: %d", panelBrightnessLevel);
                 } else {
                     DBGLOG("atk", "Failed to read brightness value");
@@ -1172,6 +1240,49 @@ void AsusSMC::readPanelBrightnessValue() {
         }
     }
     OSSafeReleaseNULL(displayDeviceEntry);
+    return ok;
+}
+
+/**
+ *  Find the display service that publishes IODisplayParameters.brightness.
+ *
+ *  Only used when the hard-coded Intel/NVIDIA paths fail, and the result is
+ *  cached, so the registry walk happens at most once.
+ */
+bool AsusSMC::findPanelEntryBySearch() {
+    if (panelEntry) {
+        return true;
+    }
+
+    IORegistryIterator *iter = IORegistryIterator::iterateOver(gIOServicePlane, kIORegistryIterateRecursively);
+    if (!iter) {
+        return false;
+    }
+
+    IORegistryEntry *found = nullptr;
+    while (IORegistryEntry *entry = iter->getNextObject()) {
+        OSDictionary *params = OSDynamicCast(OSDictionary, entry->getProperty("IODisplayParameters"));
+        if (!params) {
+            continue;
+        }
+        OSDictionary *brightness = OSDynamicCast(OSDictionary, params->getObject("brightness"));
+        if (!brightness || !brightness->getObject("value")) {
+            continue;
+        }
+        found = entry;
+        break;
+    }
+    iter->release();
+
+    if (found) {
+        found->retain();
+        panelEntry = found;
+        setProperty("AsusSMCPanelFound", found->getName());
+        return true;
+    }
+
+    setProperty("AsusSMCPanelFound", "none");
+    return false;
 }
 
 IOReturn AsusSMC::postKeyboardInputReport(const void *report, uint32_t reportSize) {
@@ -1400,6 +1511,7 @@ bool AsusSMC::vsmcNotificationHandler(void *sensors, void *refCon, IOService *vs
                 if (ls) {
                     ls->refreshALS(true);
                     ls->refreshFan();
+                    ls->followDisplayPower();
                 }
             });
 
