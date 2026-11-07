@@ -74,7 +74,7 @@
 // into the registry as AsusSMCBuild.
 //
 // Update this string whenever behaviour changes.
-#define kAsusSMCBuildTag "r21-pmguard"
+#define kAsusSMCBuildTag "r22-displaypm"
 
 
 // Kernel HID device, used for the keyboard backlight feature report. Only a
@@ -151,6 +151,12 @@ public:
     void probePowerRegistry();
     // Set after probePowerRegistry() has run once.
     bool powerProbeDone {false};
+    // Display power notifications. The registry cannot be polled for this, so
+    // the display power manager is asked to send its transitions instead.
+    void subscribeDisplayPower();
+    void publishDisplayEvents();
+    uint32_t displayOffEvents {0};
+    uint32_t displayOnEvents {0};
     // System sleep/wake handling, ported from upstream PR #62.
     void subscribePowerEvents(IOService *provider);
     IOReturn setPowerState(unsigned long powerStateOrdinal, IOService *whatDevice) override;

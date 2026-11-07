@@ -215,9 +215,47 @@ void AsusSMC::stop(IOService *provider) {
 }
 
 IOReturn AsusSMC::message(uint32_t type, IOService *provider, void *argument) {
-    DBGLOG("atk", "Received message: %u Type %x Provider %s", *((uint32_t *)argument), type, provider ? provider->getName() : "unknown");
+    // argument is null for some messages - notably the power management ones
+    // added below - so it must not be dereferenced unconditionally. DBGLOG
+    // evaluates its arguments even when logging is off, so this would have
+    // panicked a Debug build on the first display transition.
+    DBGLOG("atk", "Received message: %u Type %x Provider %s",
+           argument ? *((uint32_t *)argument) : 0, type,
+           provider ? provider->getName() : "unknown");
 
     switch (type) {
+        case kIOMessageDeviceWillPowerOff:
+        {
+            // Delivered because we registered as an interested driver of the
+            // display power manager; this is the display going to sleep. It is
+            // the signal the registry could never provide, and it means the
+            // keyboard can be blanked without macOS driving the backlight.
+            displayOffEvents++;
+            publishDisplayEvents();
+
+            if (hasKeyboardBacklight) {
+                int ret = sendKbdBacklightViaHID(0);
+                kbdDimmedForDisplay = true;
+                SYSLOG("kbd", "display power off -> keyboard backlight off (ret=0x%X)",
+                       (unsigned)ret);
+            }
+            break;
+        }
+
+        case kIOMessageDeviceHasPoweredOn:
+        {
+            displayOnEvents++;
+            publishDisplayEvents();
+
+            if (hasKeyboardBacklight) {
+                int ret = sendKbdBacklightViaHID(kbdLevel);
+                kbdDimmedForDisplay = false;
+                SYSLOG("kbd", "display powered on -> keyboard backlight %u (ret=0x%X)",
+                       (unsigned)kbdLevel, (unsigned)ret);
+            }
+            break;
+        }
+
         case kIOACPIMessageDeviceNotification:
         {
             if (directACPImessaging) {
@@ -1584,6 +1622,48 @@ void AsusSMC::probePowerRegistry() {
              scanned, withPM, withCur, firstCurName);
     setProperty("AsusSMCPowerDiag", diag);
     SYSLOG("kbd", "power registry probe: %s", diag);
+
+    // Reading the power state out of the registry turned out to be impossible.
+    // The probe reports scan=338/87/0 on this machine: 87 services carry an
+    // IOPowerManagement dictionary and not one contains CurrentPowerState. The
+    // value ioreg prints is produced when the registry is serialised, so a kext
+    // cannot read it at all - which is why every polling attempt failed.
+    //
+    // registerInterestedDriver is the supported alternative: the display power
+    // manager then *sends* us its transitions. No polling, no property reads.
+    subscribeDisplayPower();
+}
+
+void AsusSMC::subscribeDisplayPower() {
+    bool wrangler = false;
+    bool panel = false;
+
+    if (wranglerEntry) {
+        wranglerEntry->registerInterestedDriver(this);
+        wrangler = true;
+    }
+    if (panelEntry) {
+        if (IOService *p = OSDynamicCast(IOService, panelEntry)) {
+            p->registerInterestedDriver(this);
+            panel = true;
+        }
+    }
+
+    char rec[64];
+    snprintf(rec, sizeof(rec), "wrangler=%d panel=%d",
+             wrangler ? 1 : 0, panel ? 1 : 0);
+    setProperty("AsusSMCDisplayInterest", rec);
+    SYSLOG("kbd", "display power interest registered: %s", rec);
+}
+
+void AsusSMC::publishDisplayEvents() {
+    // Counters rather than a single last-event value: the display comes back on
+    // before anything can be read, so the count is the only proof that the
+    // notification ever arrived.
+    char rec[64];
+    snprintf(rec, sizeof(rec), "off=%u on=%u",
+             (unsigned)displayOffEvents, (unsigned)displayOnEvents);
+    setProperty("AsusSMCDisplayEvents", rec);
 }
 
 /**
