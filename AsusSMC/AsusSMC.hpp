@@ -74,7 +74,7 @@
 // into the registry as AsusSMCBuild.
 //
 // Update this string whenever behaviour changes.
-#define kAsusSMCBuildTag "r18-hidprobe"
+#define kAsusSMCBuildTag "r19-powerprobe"
 
 
 // Kernel HID device, used for the keyboard backlight feature report. Only a
@@ -146,6 +146,11 @@ public:
     bool readDisplayWranglerState(uint32_t *state);
     // Walk descendants looking for a power management dictionary.
     bool trySubtree(IOService *root, int depth, uint32_t *state, const char **source);
+    // One-shot report of every hop in the display power chain, published as
+    // AsusSMCPowerDiag so a broken link is measured rather than guessed at.
+    void probePowerRegistry();
+    // Set after probePowerRegistry() has run once.
+    bool powerProbeDone {false};
 
     // Read/write counters for LKSB (key 0) and LKSS (key 1). macOS only
     // writes LKSB when the keyboard brightness control is actually used, so

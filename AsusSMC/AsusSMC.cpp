@@ -1153,6 +1153,13 @@ void AsusSMC::followDisplayPower() {
 
     bool havePanel = readPanelBrightnessValue();
 
+    // Run the power chain probe once, after the first real read attempt, so it
+    // describes the state the reader actually saw rather than a startup guess.
+    if (!powerProbeDone) {
+        powerProbeDone = true;
+        probePowerRegistry();
+    }
+
     // Retry the boot-time level. It fails at start() because AsusSMC comes up
     // long before the USB keyboard enumerates (kIOReturnNotReady), and this is
     // the first place where the device is reliably available.
@@ -1397,8 +1404,88 @@ bool AsusSMC::readDisplayWranglerState(uint32_t *state) {
         }
     }
 
-    setProperty("AsusSMCPowerSource", "none");
     return false;
+}
+
+/**
+ *  One-shot self diagnosis of the display power chain.
+ *
+ *  Four rounds were spent guessing which registry entry holds the display
+ *  power state, and the read kept reporting nothing. This reports every hop
+ *  separately so the broken link is visible in one boot instead of being
+ *  inferred:
+ *
+ *   wPM   does IODisplayWrangler carry IOPowerManagement, of what class,
+ *         and does it contain CurrentPowerState
+ *   pPM   the same for the panel entry (AppleBacklightDisplay)
+ *   scan  how many services the registry walk visited, how many carry
+ *         IOPowerManagement at all, how many carry CurrentPowerState, and
+ *         the first name that had one
+ */
+void AsusSMC::probePowerRegistry() {
+    char diag[192];
+
+    bool wPM = false, wCur = false, pPM = false, pCur = false;
+    const char *wType = "null", *pType = "null";
+
+    if (wranglerEntry) {
+        if (OSObject *o = wranglerEntry->getProperty("IOPowerManagement")) {
+            wPM = true;
+            wType = o->getMetaClass()->getClassName();
+            if (OSDictionary *d = OSDynamicCast(OSDictionary, o)) {
+                wCur = d->getObject("CurrentPowerState") != nullptr;
+            }
+        }
+    }
+    if (panelEntry) {
+        if (OSObject *o = panelEntry->getProperty("IOPowerManagement")) {
+            pPM = true;
+            pType = o->getMetaClass()->getClassName();
+            if (OSDictionary *d = OSDynamicCast(OSDictionary, o)) {
+                pCur = d->getObject("CurrentPowerState") != nullptr;
+            }
+        }
+    }
+
+    uint32_t scanned = 0, withPM = 0, withCur = 0;
+    char firstCurName[48] = "-";
+
+    if (IORegistryIterator *iter =
+            IORegistryIterator::iterateOver(gIOServicePlane, kIORegistryIterateRecursively)) {
+        while (OSObject *obj = iter->getNextObject()) {
+            IOService *svc = OSDynamicCast(IOService, obj);
+            if (!svc) {
+                continue;
+            }
+            scanned++;
+
+            OSObject *o = svc->getProperty("IOPowerManagement");
+            if (!o) {
+                continue;
+            }
+            withPM++;
+
+            OSDictionary *d = OSDynamicCast(OSDictionary, o);
+            if (!d || !d->getObject("CurrentPowerState")) {
+                continue;
+            }
+            withCur++;
+
+            if (firstCurName[0] == '-') {
+                const char *n = svc->getName();
+                snprintf(firstCurName, sizeof(firstCurName), "%s", n ? n : "?");
+            }
+        }
+        iter->release();
+    }
+
+    snprintf(diag, sizeof(diag),
+             "wPM=%d/%s/%d pPM=%d/%s/%d scan=%u/%u/%u first=%s",
+             wPM ? 1 : 0, wType, wCur ? 1 : 0,
+             pPM ? 1 : 0, pType, pCur ? 1 : 0,
+             scanned, withPM, withCur, firstCurName);
+    setProperty("AsusSMCPowerDiag", diag);
+    SYSLOG("kbd", "power registry probe: %s", diag);
 }
 
 /**
