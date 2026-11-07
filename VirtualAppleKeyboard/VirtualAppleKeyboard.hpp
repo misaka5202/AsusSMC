@@ -55,4 +55,11 @@ public:
     // measured instead of assumed.
     static uint32_t getReportCount;
     static uint32_t setReportCount;
+    // Every request, not just the last one. The last-request counters cannot
+    // distinguish "two reads of the backlight report" from "a format report
+    // read that was answered with nothing, followed by the backlight read",
+    // and the AppleHIDKeyboard log shows exactly that second case happening:
+    // "Unexpected Keyboard Format Report Version 0."
+    static OSArray *getLog;
+    static OSArray *setLog;
 };

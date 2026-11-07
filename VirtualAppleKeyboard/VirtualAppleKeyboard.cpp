@@ -97,6 +97,24 @@ uint8_t VirtualAppleKeyboard::reportedLevel = 0;
 // is answered by measurement.
 uint32_t VirtualAppleKeyboard::getReportCount = 0;
 uint32_t VirtualAppleKeyboard::setReportCount = 0;
+// (id, type, length) triples for the first eight requests of each kind.
+OSArray *VirtualAppleKeyboard::getLog = nullptr;
+OSArray *VirtualAppleKeyboard::setLog = nullptr;
+
+// Append one (id, type, length) triple to a request log and publish it.
+static void recordRequest(OSArray **log, const char *key, IOHIDDevice *self,
+                          uint8_t id, uint32_t type, uint32_t len) {
+    if (!*log) {
+        *log = OSArray::withCapacity(24);
+    }
+    if (!*log || (*log)->getCount() >= 24) {
+        return;
+    }
+    (*log)->addObject(OSNumber::withNumber(id, 8));
+    (*log)->addObject(OSNumber::withNumber(type, 8));
+    (*log)->addObject(OSNumber::withNumber(len, 32));
+    self->setProperty(key, *log);
+}
 
 
 bool VirtualAppleKeyboard::handleStart(IOService *provider) {
@@ -129,6 +147,8 @@ IOReturn VirtualAppleKeyboard::getReport(IOMemoryDescriptor *report, IOHIDReport
     setProperty("AsusSMCHIDGetId", (uint64_t)report_id, 32);
     setProperty("AsusSMCHIDGetType", (uint64_t)reportType, 32);
     setProperty("AsusSMCHIDGetLen", (uint64_t)(report ? report->getLength() : 0), 32);
+    recordRequest(&getLog, "AsusSMCHIDGetLog", this, report_id, (uint32_t)reportType,
+                  report ? (uint32_t)report->getLength() : 0);
 
     if (report_id == 0xbf && report != nullptr) {
         // Backlight status. Byte 4 reads as the level on the 0x20 scale that
@@ -164,6 +184,8 @@ IOReturn VirtualAppleKeyboard::setReport(IOMemoryDescriptor *report, IOHIDReport
     setProperty("AsusSMCHIDSetCount", (uint64_t)setReportCount, 32);
     setProperty("AsusSMCHIDSetId", (uint64_t)report_id, 32);
     setProperty("AsusSMCHIDSetType", (uint64_t)reportType, 32);
+    recordRequest(&setLog, "AsusSMCHIDSetLog", this, report_id, (uint32_t)reportType,
+                  report ? (uint32_t)report->getLength() : 0);
 
     if (report_id == 0xbf && report != nullptr) {
         uint8_t buf[40] = {};
