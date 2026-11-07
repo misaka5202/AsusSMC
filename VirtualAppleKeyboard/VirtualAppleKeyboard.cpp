@@ -102,6 +102,8 @@ OSArray *VirtualAppleKeyboard::getLog = nullptr;
 OSArray *VirtualAppleKeyboard::setLog = nullptr;
 
 // Append one (id, type, length) triple to a request log and publish it.
+// OSArray has no addObject, so each entry goes in by index, tracked by the
+// array's own count (setObject with an index at or beyond the count grows it).
 static void recordRequest(OSArray **log, const char *key, IOHIDDevice *self,
                           uint8_t id, uint32_t type, uint32_t len) {
     if (!*log) {
@@ -110,9 +112,11 @@ static void recordRequest(OSArray **log, const char *key, IOHIDDevice *self,
     if (!*log || (*log)->getCount() >= 24) {
         return;
     }
-    (*log)->addObject(OSNumber::withNumber(id, 8));
-    (*log)->addObject(OSNumber::withNumber(type, 8));
-    (*log)->addObject(OSNumber::withNumber(len, 32));
+
+    unsigned idx = (*log)->getCount();
+    (*log)->setObject(OSNumber::withNumber(id, 8), idx);
+    (*log)->setObject(OSNumber::withNumber(type, 8), idx + 1);
+    (*log)->setObject(OSNumber::withNumber(len, 32), idx + 2);
     self->setProperty(key, *log);
 }
 

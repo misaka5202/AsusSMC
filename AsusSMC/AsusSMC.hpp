@@ -74,7 +74,7 @@
 // into the registry as AsusSMCBuild.
 //
 // Update this string whenever behaviour changes.
-#define kAsusSMCBuildTag "r28-reqlog"
+#define kAsusSMCBuildTag "r29-reqlog2"
 
 
 // Kernel HID device, used for the keyboard backlight feature report. Only a
