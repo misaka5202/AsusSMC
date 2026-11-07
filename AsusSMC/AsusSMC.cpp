@@ -142,11 +142,13 @@ bool AsusSMC::start(IOService *provider) {
  *  this the keyboard either stays lit during sleep or comes back dark after
  *  waking, because nothing else restores it.
  */
+// kIOPMPowerOff does not exist in IOKit; upstream's patch defines its own zero
+// for the off state, and so does this one. kIOPMPowerOn does exist.
 #define kPowerStateOff 0
 #define kPowerStateCount 2
 
 static IOPMPowerState powerStates[kPowerStateCount] = {
-    {1, kIOPMPowerOff, kIOPMPowerOff, kIOPMPowerOff, 0, 0, 0, 0, 0, 0, 0, 0},
+    {1, kPowerStateOff, kPowerStateOff, kPowerStateOff, 0, 0, 0, 0, 0, 0, 0, 0},
     {1, kIOPMPowerOn, kIOPMPowerOn, kIOPMPowerOn, 0, 0, 0, 0, 0, 0, 0, 0},
 };
 
