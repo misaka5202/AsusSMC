@@ -538,10 +538,23 @@ int AsusSMC::sendKbdBacklightViaHID(uint8_t level) {
 
 void AsusSMC::recordKbdWrite(uint8_t val1, uint8_t val2, uint16_t packed, uint16_t level) {
     kbdWriteCount++;
-    char rec[128];
+
+    // Keep a short history of the raw payloads, not just the last one.
+    //
+    // macOS writes LKSB repeatedly at boot - 19 times on this machine. With
+    // only the final value recorded there is no way to tell whether that is
+    // nineteen identical zeros or a sequence, and the difference decides
+    // whether macOS is sweeping the range or repeatedly giving up.
+    if (kbdWriteLogPos < sizeof(kbdWriteLog) - 8) {
+        kbdWriteLogPos += (size_t)snprintf(kbdWriteLog + kbdWriteLogPos,
+                                          sizeof(kbdWriteLog) - kbdWriteLogPos,
+                                          "%u,%u;", val1, val2);
+    }
+
+    char rec[160];
     snprintf(rec, sizeof(rec),
-             "val1=%u val2=%u packed=0x%X level=%u count=%u",
-             val1, val2, packed, level, (unsigned)kbdWriteCount);
+             "val1=%u val2=%u packed=0x%X level=%u count=%u log=%s",
+             val1, val2, packed, level, (unsigned)kbdWriteCount, kbdWriteLog);
     setProperty("AsusSMCLKSB", rec);
 }
 
@@ -1289,9 +1302,23 @@ void AsusSMC::followDisplayPower() {
 
     bool havePanel = readPanelBrightnessValue();
 
-    // Run the power chain probe once, after the first real read attempt, so it
-    // describes the state the reader actually saw rather than a startup guess.
-    if (!powerProbeDone) {
+    // Both of the steps below need the display services to have been resolved,
+    // and neither may run only once at the first timer tick.
+    //
+    // IODisplayWrangler is not matched that early, so on the first tick
+    // wranglerEntry and panelEntry are both null. The previous revision set its
+    // one-shot flags anyway, which is why every boot reported
+    // AsusSMCDisplayInterest = "wrangler=0 panel=0" - the registration had
+    // never actually executed, and the "off=0" result that followed said
+    // nothing about whether the mechanism works.
+    if (!displayInterestDone && (wranglerEntry || panelEntry)) {
+        subscribeDisplayPower();
+    }
+
+    // The probe is also delayed: measuring the power chain during early boot
+    // reports dictionaries that the system has not populated yet. Thirty ticks
+    // is enough for IOPM to settle, and the result is then trustworthy.
+    if (!powerProbeDone && ++pollTicks >= 30) {
         powerProbeDone = true;
         probePowerRegistry();
     }
@@ -1654,6 +1681,12 @@ void AsusSMC::subscribeDisplayPower() {
              wrangler ? 1 : 0, panel ? 1 : 0);
     setProperty("AsusSMCDisplayInterest", rec);
     SYSLOG("kbd", "display power interest registered: %s", rec);
+
+    // Only stop retrying once something actually registered. Reporting the
+    // failure honestly is what makes the next result interpretable.
+    if (wrangler || panel) {
+        displayInterestDone = true;
+    }
 }
 
 void AsusSMC::publishDisplayEvents() {

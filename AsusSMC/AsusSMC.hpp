@@ -74,7 +74,7 @@
 // into the registry as AsusSMCBuild.
 //
 // Update this string whenever behaviour changes.
-#define kAsusSMCBuildTag "r22-displaypm"
+#define kAsusSMCBuildTag "r23-retry"
 
 
 // Kernel HID device, used for the keyboard backlight feature report. Only a
@@ -157,6 +157,15 @@ public:
     void publishDisplayEvents();
     uint32_t displayOffEvents {0};
     uint32_t displayOnEvents {0};
+    // Both of these must be retried until the display services resolve: on the
+    // first timer tick they do not exist yet, and a one-shot flag set there
+    // silently disabled the feature forever.
+    bool displayInterestDone {false};
+    uint32_t pollTicks {0};
+    // Short history of the raw LKSB payloads, so a repeated zero can be told
+    // apart from a sequence.
+    char kbdWriteLog[128] {};
+    size_t kbdWriteLogPos {0};
     // System sleep/wake handling, ported from upstream PR #62.
     void subscribePowerEvents(IOService *provider);
     IOReturn setPowerState(unsigned long powerStateOrdinal, IOService *whatDevice) override;
