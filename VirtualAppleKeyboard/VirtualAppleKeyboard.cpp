@@ -97,25 +97,31 @@ uint8_t VirtualAppleKeyboard::reportedLevel = 0;
 // is answered by measurement.
 uint32_t VirtualAppleKeyboard::getReportCount = 0;
 uint32_t VirtualAppleKeyboard::setReportCount = 0;
-// (id, type, length) triples for the first eight requests of each kind.
-OSArray *VirtualAppleKeyboard::getLog = nullptr;
-OSArray *VirtualAppleKeyboard::setLog = nullptr;
 
 // Append one (id, type, length) triple to a request log and publish it.
-// The single-argument setObject(const OSMetaClassBase*) is OSArray's append.
-static void recordRequest(OSArray **log, const char *key, IOHIDDevice *self,
-                          uint8_t id, uint32_t type, uint32_t len) {
-    if (!*log) {
-        *log = OSArray::withCapacity(24);
-    }
-    if (!*log || (*log)->getCount() >= 24) {
+//
+// This must not allocate: the r30 version used OSArray::withCapacity(), which
+// returns a temporary smart pointer under the current MacKernelSDK - it
+// released the array when the statement ended, and the first getReport after
+// boot dereferenced a dangling pointer. That is the boot panic. The log is
+// therefore a fixed buffer in a byte-property, which IORegistryEntry copies.
+static void recordRequest(IOHIDDevice *self, uint8_t id, uint32_t type,
+                          uint32_t len, const char *key, uint8_t *storage,
+                          uint32_t *count) {
+    uint8_t *entries = storage;         // triples live here
+    uint8_t *idx = storage + 24;        // count lives in the last byte
+    if (!entries || !idx || !count) {
         return;
     }
-
-    (*log)->setObject(OSNumber::withNumber(id, 8));
-    (*log)->setObject(OSNumber::withNumber(type, 8));
-    (*log)->setObject(OSNumber::withNumber(len, 32));
-    self->setProperty(key, *log);
+    if (*idx >= 8) {
+        return;
+    }
+    entries[(*idx) * 3 + 0] = id;
+    entries[(*idx) * 3 + 1] = (uint8_t)type;
+    entries[(*idx) * 3 + 2] = (uint8_t)len;
+    (*idx)++;
+    *count = *idx;
+    self->setProperty(key, storage, 25);
 }
 
 
@@ -149,8 +155,9 @@ IOReturn VirtualAppleKeyboard::getReport(IOMemoryDescriptor *report, IOHIDReport
     setProperty("AsusSMCHIDGetId", (uint64_t)report_id, 32);
     setProperty("AsusSMCHIDGetType", (uint64_t)reportType, 32);
     setProperty("AsusSMCHIDGetLen", (uint64_t)(report ? report->getLength() : 0), 32);
-    recordRequest(&getLog, "AsusSMCHIDGetLog", this, report_id, (uint32_t)reportType,
-                  report ? (uint32_t)report->getLength() : 0);
+    recordRequest(this, report_id, (uint32_t)reportType,
+                  report ? (uint32_t)report->getLength() : 0,
+                  "AsusSMCHIDGetLog", getLogBytes, &getLogCount);
 
     if (report_id == 0xbf && report != nullptr) {
         // Backlight status. Byte 4 reads as the level on the 0x20 scale that
@@ -186,8 +193,9 @@ IOReturn VirtualAppleKeyboard::setReport(IOMemoryDescriptor *report, IOHIDReport
     setProperty("AsusSMCHIDSetCount", (uint64_t)setReportCount, 32);
     setProperty("AsusSMCHIDSetId", (uint64_t)report_id, 32);
     setProperty("AsusSMCHIDSetType", (uint64_t)reportType, 32);
-    recordRequest(&setLog, "AsusSMCHIDSetLog", this, report_id, (uint32_t)reportType,
-                  report ? (uint32_t)report->getLength() : 0);
+    recordRequest(this, report_id, (uint32_t)reportType,
+                  report ? (uint32_t)report->getLength() : 0,
+                  "AsusSMCHIDSetLog", setLogBytes, &setLogCount);
 
     if (report_id == 0xbf && report != nullptr) {
         uint8_t buf[40] = {};

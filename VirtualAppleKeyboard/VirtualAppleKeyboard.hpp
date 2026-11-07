@@ -55,11 +55,12 @@ public:
     // measured instead of assumed.
     static uint32_t getReportCount;
     static uint32_t setReportCount;
-    // Every request, not just the last one. The last-request counters cannot
-    // distinguish "two reads of the backlight report" from "a format report
-    // read that was answered with nothing, followed by the backlight read",
-    // and the AppleHIDKeyboard log shows exactly that second case happening:
-    // "Unexpected Keyboard Format Report Version 0."
-    static OSArray *getLog;
-    static OSArray *setLog;
+    // Fixed-size request history. Stored as OSData properties of 25 bytes:
+    // 24 bytes = 8 (id, type, len) triples, byte 25 = number of triples.
+    // Deliberately NOT an OSArray: the OSArray version returned a temporary
+    // smart pointer from withCapacity() and crashed the boot.
+    uint8_t getLogBytes[25] = {};
+    uint8_t setLogBytes[25] = {};
+    uint32_t getLogCount = 0;
+    uint32_t setLogCount = 0;
 };

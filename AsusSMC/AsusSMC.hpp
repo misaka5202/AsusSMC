@@ -74,7 +74,7 @@
 // into the registry as AsusSMCBuild.
 //
 // Update this string whenever behaviour changes.
-#define kAsusSMCBuildTag "r30-setobj"
+#define kAsusSMCBuildTag "r31-fixedlog"
 
 
 // Kernel HID device, used for the keyboard backlight feature report. Only a
