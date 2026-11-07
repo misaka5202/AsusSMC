@@ -7,6 +7,9 @@
 
 #include <IOKit/hid/IOHIDDevice.h>
 
+// Invoked when macOS writes to the keyboard backlight collection.
+typedef void (*VAKBacklightSink)(const uint8_t *bytes, uint32_t length, void *context);
+
 class VirtualAppleKeyboard final : public IOHIDDevice {
     OSDeclareDefaultStructors(VirtualAppleKeyboard);
 
@@ -17,6 +20,18 @@ public:
 
     IOReturn getReport(IOMemoryDescriptor *report, IOHIDReportType reportType, IOOptionBits options) override;
 
+    // The one half of the backlight protocol that was missing. IOHIDDevice's
+    // default returns kIOReturnUnsupported, which is why macOS offered the
+    // keyboard brightness control but left it disabled: it could read the
+    // capability from getReport but every attempt to set a level failed.
+    IOReturn setReport(IOMemoryDescriptor *report, IOHIDReportType reportType, IOOptionBits options) override;
+
+    // Wires the collection to the driver that can actually reach the EC.
+    static void setBacklightSink(VAKBacklightSink sink, void *context) {
+        backlightSink = sink;
+        backlightContext = context;
+    }
+
     OSString *newManufacturerString() const override;
     OSString *newProductString() const override;
     OSNumber *newVendorIDNumber() const override;
@@ -26,4 +41,13 @@ public:
     OSNumber *newVersionNumber() const override;
     OSNumber *newPrimaryUsagePageNumber() const override;
     OSNumber *newPrimaryUsageNumber() const override;
+
+private:
+    static VAKBacklightSink backlightSink;
+    static void *backlightContext;
+
+public:
+    // Level reported back to macOS in the backlight status blob, on the 0x20
+    // scale of the shipped layout. Updated by the owning driver.
+    static uint8_t reportedLevel;
 };

@@ -10,6 +10,11 @@
 #define super IOHIDDevice
 OSDefineMetaClassAndStructors(VirtualAppleKeyboard, super);
 
+// Where keyboard backlight writes go. Set by the owning driver; null until
+// then, in which case writes are accepted and recorded but not forwarded.
+VAKBacklightSink VirtualAppleKeyboard::backlightSink = nullptr;
+void *VirtualAppleKeyboard::backlightContext = nullptr;
+
 const uint8_t virt_reportDescriptor[] = {
     0x05, 0x01,       // Usage Page (Generic Desktop)
     0x09, 0x06,       // Usage (Keyboard)
@@ -78,8 +83,15 @@ const uint8_t virt_reportDescriptor[] = {
     0x19, 0x00,       //   Usage Minimum........... (0)
     0x29, 0xff,       //   Usage Maximum........... (255)
     0x81, 0x00,       //   Input...................(Data, Array, Absolute)
+    0x91, 0x00,       //   Output..................(Data, Array, Absolute)
+    0xb1, 0x00,       //   Feature.................(Data, Array, Absolute)
     0xc0,             // End Collection
 };
+
+// Where VirtualAppleKeyboard publishes the current level back to macOS.
+// Byte 4 of the get status blob; scale is 0..0x20 as in the shipped blob.
+uint8_t VirtualAppleKeyboard::reportedLevel = 0;
+
 
 bool VirtualAppleKeyboard::handleStart(IOService *provider) {
     if (!super::handleStart(provider)) {
@@ -103,13 +115,48 @@ IOReturn VirtualAppleKeyboard::getReport(IOMemoryDescriptor *report, IOHIDReport
     OSData *get_buffer = OSData::withCapacity(1);
 
     if (report_id == 0xbf) {
-        uint8_t buffer[] = {0x00, 0x01, 0x00, 0x00, 0x00, 0x20, 0x02, 0x00};
+        // Backlight status. Kept to the layout shipped upstream (byte 4 reads
+        // as the level on a 0x20 scale, byte 5 as the maximum), with the level
+        // now reflecting what the driver last applied instead of a constant.
+        uint8_t buffer[] = {0x00, 0x01, 0x00, 0x00, reportedLevel, 0x20, 0x02, 0x00};
         get_buffer->appendBytes(buffer, sizeof(buffer));
     }
 
     report->writeBytes(0, get_buffer->getBytesNoCopy(), get_buffer->getLength());
     get_buffer->release();
 
+    return kIOReturnSuccess;
+}
+
+IOReturn VirtualAppleKeyboard::setReport(IOMemoryDescriptor *report, IOHIDReportType reportType, IOOptionBits options) {
+    uint8_t report_id = options & 0xff;
+
+    if (report_id == 0xbf && report != nullptr) {
+        uint8_t buf[40] = {};
+        IOByteCount length = report->getLength();
+        if (length > sizeof(buf)) {
+            length = sizeof(buf);
+        }
+        if (length > 0 && report->readBytes(0, buf, length) == length) {
+            // Record exactly what macOS sent. The payload layout of this
+            // collection is not documented anywhere, so the first captures
+            // calibrate the mapping rather than guessing it.
+            char hex[3 * sizeof(buf) + 16] = {0};
+            size_t pos = 0;
+            for (IOByteCount i = 0; i < length && pos + 3 < sizeof(hex); i++) {
+                pos += (size_t)snprintf(hex + pos, sizeof(hex) - pos, "%02X ", buf[i]);
+            }
+            setProperty("AsusSMCHIDBacklightSet", hex);
+
+            if (backlightSink) {
+                backlightSink(buf, (uint32_t)length, backlightContext);
+            }
+        }
+    }
+
+    // Returning success here is the actual fix: the default IOHIDDevice
+    // implementation returns kIOReturnUnsupported, and a rejected write is
+    // what left the brightness control permanently disabled.
     return kIOReturnSuccess;
 }
 

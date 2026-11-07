@@ -124,12 +124,60 @@ bool AsusSMC::start(IOService *provider) {
 
     registerVSMC();
 
+    // System power events. Ported from upstream PR #62, merged into 1.2.2 and
+    // confirmed by several users: without joining the power tree the keyboard
+    // stays dark after a wake, because nothing restores the level.
+    subscribePowerEvents(provider);
+
     registerService();
 
     return true;
 }
 
+/**
+ *  System power events, ported from upstream PR #62 (merged into 1.2.2).
+ *
+ *  Two states are enough: off and on. When the system goes to sleep the
+ *  keyboard is blanked, and on wake the remembered level is restored. Without
+ *  this the keyboard either stays lit during sleep or comes back dark after
+ *  waking, because nothing else restores it.
+ */
+#define kPowerStateOff 0
+#define kPowerStateCount 2
+
+static IOPMPowerState powerStates[kPowerStateCount] = {
+    {1, kIOPMPowerOff, kIOPMPowerOff, kIOPMPowerOff, 0, 0, 0, 0, 0, 0, 0, 0},
+    {1, kIOPMPowerOn, kIOPMPowerOn, kIOPMPowerOn, 0, 0, 0, 0, 0, 0, 0, 0},
+};
+
+IOReturn AsusSMC::setPowerState(unsigned long powerStateOrdinal, IOService *whatDevice) {
+    if (powerStateOrdinal == kPowerStateOff) {
+        // Sleep, shutdown or reboot. Blanking here is what keeps the keyboard
+        // from glowing through the night.
+        int ret = sendKbdBacklightViaHID(0);
+        SYSLOG("kbd", "system sleep -> keyboard backlight off (ret=0x%X)", (unsigned)ret);
+    } else {
+        int ret = sendKbdBacklightViaHID(kbdLevel);
+        SYSLOG("kbd", "system wake -> keyboard backlight %u (ret=0x%X)",
+               (unsigned)kbdLevel, (unsigned)ret);
+    }
+    return kIOPMAckImplied;
+}
+
+void AsusSMC::subscribePowerEvents(IOService *provider) {
+    PMinit();
+    provider->joinPMtree(this);
+    IOReturn ret = registerPowerDriver(this, powerStates, kPowerStateCount);
+    pmJoined = (ret == kIOReturnSuccess);
+    setProperty("AsusSMCPowerEvents", pmJoined ? "registered" : "failed");
+    SYSLOG("kbd", "power events: registerPowerDriver ret=0x%X", (unsigned)ret);
+}
+
 void AsusSMC::stop(IOService *provider) {
+    if (pmJoined) {
+        PMstop();
+        pmJoined = false;
+    }
     if (poller) {
         poller->cancelTimeout();
     }
@@ -637,12 +685,52 @@ void AsusSMC::initBattery() {
 }
 
 void AsusSMC::initVirtualKeyboard() {
+    // Route the KeyboardBacklight collection to this driver before the device
+    // starts, so a write from macOS is never dropped for lack of a sink.
+    VirtualAppleKeyboard::setBacklightSink(virtualKeyboardBacklightSink, this);
+
     kbdDevice = new VirtualAppleKeyboard;
 
     if (!kbdDevice || !kbdDevice->init() || !kbdDevice->attach(this) || !kbdDevice->start(this)) {
         OSSafeReleaseNULL(kbdDevice);
         SYSLOG("vkbd", "Failed to init VirtualAppleKeyboard");
     }
+}
+
+void AsusSMC::virtualKeyboardBacklightSink(const uint8_t *bytes, uint32_t length, void *context) {
+    AsusSMC *self = static_cast<AsusSMC *>(context);
+    if (self) {
+        self->handleVirtualKeyboardBacklight(bytes, length);
+    }
+}
+
+void AsusSMC::handleVirtualKeyboardBacklight(const uint8_t *bytes, uint32_t length) {
+    if (!bytes || length < 2) {
+        return;
+    }
+
+    // Payload layout of the KeyboardBacklight collection is not documented.
+    // Byte 0 is the report id, so the first data byte is the only sane
+    // candidate: taken as-is when it already fits the hardware range,
+    // otherwise scaled from a 0..255 range. The hex dump that setReport
+    // publishes shows the real layout once the slider is used.
+    uint32_t raw = bytes[1];
+    uint8_t level;
+    if (raw <= ASUS_KBD_BACKLIGHT_MAX) {
+        level = (uint8_t)raw;
+    } else {
+        level = (uint8_t)(raw * ASUS_KBD_BACKLIGHT_MAX / 255);
+    }
+
+    kbdLevel = level;
+    kbdDimmedForDisplay = false;
+
+    VirtualAppleKeyboard::reportedLevel = (uint8_t)(level * 10);
+
+    int ret = sendKbdBacklightViaHID(level);
+    SYSLOG("kbd", "HID backlight write: level=%u raw=%u (ret=0x%X)",
+           (unsigned)level, (unsigned)raw, (unsigned)ret);
+    setProperty("AsusSMCHIDBacklight", "applied");
 }
 
 void AsusSMC::startATKDevice() {

@@ -74,7 +74,7 @@
 // into the registry as AsusSMCBuild.
 //
 // Update this string whenever behaviour changes.
-#define kAsusSMCBuildTag "r19-powerprobe"
+#define kAsusSMCBuildTag "r20-pmsleep-hidset"
 
 
 // Kernel HID device, used for the keyboard backlight feature report. Only a
@@ -149,6 +149,15 @@ public:
     // One-shot report of every hop in the display power chain, published as
     // AsusSMCPowerDiag so a broken link is measured rather than guessed at.
     void probePowerRegistry();
+    // Set after probePowerRegistry() has run once.
+    bool powerProbeDone {false};
+    // System sleep/wake handling, ported from upstream PR #62.
+    void subscribePowerEvents(IOService *provider);
+    IOReturn setPowerState(unsigned long powerStateOrdinal, IOService *whatDevice) override;
+    bool pmJoined {false};
+    // Keyboard brightness writes arriving through the virtual Apple keyboard.
+    static void virtualKeyboardBacklightSink(const uint8_t *bytes, uint32_t length, void *context);
+    void handleVirtualKeyboardBacklight(const uint8_t *bytes, uint32_t length);
     // Set after probePowerRegistry() has run once.
     bool powerProbeDone {false};
 
