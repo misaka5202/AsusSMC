@@ -50,4 +50,9 @@ public:
     // Level reported back to macOS in the backlight status blob, on the 0x20
     // scale of the shipped layout. Updated by the owning driver.
     static uint8_t reportedLevel;
+    // Request counters. Whether macOS ever reads or writes this collection,
+    // and with which report type, decides the whole approach - so it is
+    // measured instead of assumed.
+    static uint32_t getReportCount;
+    static uint32_t setReportCount;
 };

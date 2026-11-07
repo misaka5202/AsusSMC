@@ -89,8 +89,14 @@ const uint8_t virt_reportDescriptor[] = {
 };
 
 // Where VirtualAppleKeyboard publishes the current level back to macOS.
+// Where VirtualAppleKeyboard publishes the current level back to macOS.
 // Byte 4 of the get status blob; scale is 0..0x20 as in the shipped blob.
 uint8_t VirtualAppleKeyboard::reportedLevel = 0;
+
+// Request counters, published so the question "is macOS reading this at all"
+// is answered by measurement.
+uint32_t VirtualAppleKeyboard::getReportCount = 0;
+uint32_t VirtualAppleKeyboard::setReportCount = 0;
 
 
 bool VirtualAppleKeyboard::handleStart(IOService *provider) {
@@ -112,24 +118,52 @@ IOReturn VirtualAppleKeyboard::newReportDescriptor(IOMemoryDescriptor **descript
 
 IOReturn VirtualAppleKeyboard::getReport(IOMemoryDescriptor *report, IOHIDReportType reportType, IOOptionBits options) {
     uint8_t report_id = options & 0xff;
-    OSData *get_buffer = OSData::withCapacity(1);
 
-    if (report_id == 0xbf) {
-        // Backlight status. Kept to the layout shipped upstream (byte 4 reads
-        // as the level on a 0x20 scale, byte 5 as the maximum), with the level
-        // now reflecting what the driver last applied instead of a constant.
-        uint8_t buffer[] = {0x00, 0x01, 0x00, 0x00, reportedLevel, 0x20, 0x02, 0x00};
-        get_buffer->appendBytes(buffer, sizeof(buffer));
+    // Record every request. This is the question that decides everything about
+    // the System Settings brightness control: does macOS ever read this
+    // collection, with which report type, and how many bytes does it expect?
+    // Answered by numbers rather than by guessing, because the previous rounds
+    // of guessing cost far more than asking did.
+    getReportCount++;
+    setProperty("AsusSMCHIDGetCount", (uint64_t)getReportCount, 32);
+    setProperty("AsusSMCHIDGetId", (uint64_t)report_id, 32);
+    setProperty("AsusSMCHIDGetType", (uint64_t)reportType, 32);
+    setProperty("AsusSMCHIDGetLen", (uint64_t)(report ? report->getLength() : 0), 32);
+
+    if (report_id == 0xbf && report != nullptr) {
+        // Backlight status. Byte 4 reads as the level on the 0x20 scale that
+        // the shipped blob uses, byte 5 as the maximum. The whole requested
+        // length is filled: returning eight bytes for a Feature report that
+        // asks for more is exactly the kind of short answer a caller may
+        // reject, and it costs nothing to avoid.
+        uint8_t buffer[40];
+        memset(buffer, 0, sizeof(buffer));
+
+        const uint8_t blob[] = {0x00, 0x01, 0x00, 0x00, reportedLevel, 0x20, 0x02, 0x00};
+        memcpy(buffer, blob, sizeof(blob));
+
+        IOByteCount want = report->getLength();
+        if (want > sizeof(buffer)) {
+            want = sizeof(buffer);
+        }
+        if (want >= sizeof(blob)) {
+            report->writeBytes(0, buffer, want);
+        } else {
+            report->writeBytes(0, blob, sizeof(blob));
+        }
+        return kIOReturnSuccess;
     }
-
-    report->writeBytes(0, get_buffer->getBytesNoCopy(), get_buffer->getLength());
-    get_buffer->release();
 
     return kIOReturnSuccess;
 }
 
 IOReturn VirtualAppleKeyboard::setReport(IOMemoryDescriptor *report, IOHIDReportType reportType, IOOptionBits options) {
     uint8_t report_id = options & 0xff;
+
+    setReportCount++;
+    setProperty("AsusSMCHIDSetCount", (uint64_t)setReportCount, 32);
+    setProperty("AsusSMCHIDSetId", (uint64_t)report_id, 32);
+    setProperty("AsusSMCHIDSetType", (uint64_t)reportType, 32);
 
     if (report_id == 0xbf && report != nullptr) {
         uint8_t buf[40] = {};
