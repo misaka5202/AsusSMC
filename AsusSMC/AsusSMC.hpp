@@ -158,8 +158,6 @@ public:
     // Keyboard brightness writes arriving through the virtual Apple keyboard.
     static void virtualKeyboardBacklightSink(const uint8_t *bytes, uint32_t length, void *context);
     void handleVirtualKeyboardBacklight(const uint8_t *bytes, uint32_t length);
-    // Set after probePowerRegistry() has run once.
-    bool powerProbeDone {false};
 
     // Read/write counters for LKSB (key 0) and LKSS (key 1). macOS only
     // writes LKSB when the keyboard brightness control is actually used, so

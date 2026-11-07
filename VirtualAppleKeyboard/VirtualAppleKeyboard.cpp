@@ -140,12 +140,17 @@ IOReturn VirtualAppleKeyboard::setReport(IOMemoryDescriptor *report, IOHIDReport
         if (length > 0 && report->readBytes(0, buf, length) == length) {
             // Record exactly what macOS sent. The payload layout of this
             // collection is not documented anywhere, so the first captures
-            // calibrate the mapping rather than guessing it.
-            char hex[3 * sizeof(buf) + 16] = {0};
+            // calibrate the mapping rather than guessing it. Built by hand to
+            // avoid pulling printf into this file.
+            static const char hexDigits[] = "0123456789ABCDEF";
+            char hex[3 * sizeof(buf)];
             size_t pos = 0;
             for (IOByteCount i = 0; i < length && pos + 3 < sizeof(hex); i++) {
-                pos += (size_t)snprintf(hex + pos, sizeof(hex) - pos, "%02X ", buf[i]);
+                hex[pos++] = hexDigits[(buf[i] >> 4) & 0x0f];
+                hex[pos++] = hexDigits[buf[i] & 0x0f];
+                hex[pos++] = ' ';
             }
+            hex[pos] = '\0';
             setProperty("AsusSMCHIDBacklightSet", hex);
 
             if (backlightSink) {
