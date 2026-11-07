@@ -74,7 +74,7 @@ const uint8_t virt_reportDescriptor[] = {
     0x06, 0x00, 0xff, // Usage Page (kHIDPage_AppleVendor)
     0x09, 0x0f,       // Usage 15 (kHIDUsage_AppleVendor_KeyboardBacklight)
     0xa1, 0x01,       // Collection (Application)
-    0x85, 0xbf,       //   Report ID (191)
+    0x85, 0xbf,       //   Report ID (191)  <- config report (Feature, GET)
     0x06, 0x00, 0xff, //   Usage Page (kHIDUsage_AppleVendor_KeyboardBacklight)
     0x95, 0x20,       //   Report Count............ (32)
     0x75, 0x08,       //   Report Size............. (8)
@@ -84,6 +84,20 @@ const uint8_t virt_reportDescriptor[] = {
     0x29, 0xff,       //   Usage Maximum........... (255)
     0x81, 0x00,       //   Input...................(Data, Array, Absolute)
     0x91, 0x00,       //   Output..................(Data, Array, Absolute)
+    0xb1, 0x00,       //   Feature.................(Data, Array, Absolute)
+    0xc0,             // End Collection
+
+    0x06, 0x00, 0xff, // Usage Page (kHIDPage_AppleVendor)
+    0x09, 0x0f,       // Usage 15 (kHIDUsage_AppleVendor_KeyboardBacklight)
+    0xa1, 0x01,       // Collection (Application)
+    0x85, 0xb0,       //   Report ID (176)  <- set report (Feature, SET)
+    0x06, 0x00, 0xff, //   Usage Page (kHIDUsage_AppleVendor_KeyboardBacklight)
+    0x95, 0x20,       //   Report Count............ (32)
+    0x75, 0x08,       //   Report Size............. (8)
+    0x15, 0x00,       //   Logical Minimum......... (0)
+    0x26, 0xff, 0x00, //   Logical Maximum......... (255)
+    0x19, 0x00,       //   Usage Minimum........... (0)
+    0x29, 0xff,       //   Usage Maximum........... (255)
     0xb1, 0x00,       //   Feature.................(Data, Array, Absolute)
     0xc0,             // End Collection
 };
@@ -160,26 +174,53 @@ IOReturn VirtualAppleKeyboard::getReport(IOMemoryDescriptor *report, IOHIDReport
                   "AsusSMCHIDGetLog", getLogBytes, &getLogCount);
 
     if (report_id == 0xbf && report != nullptr) {
-        // Backlight status. Byte 4 reads as the level on the 0x20 scale that
-        // the shipped blob uses, byte 5 as the maximum. The whole requested
-        // length is filled: returning eight bytes for a Feature report that
-        // asks for more is exactly the kind of short answer a caller may
-        // reject, and it costs nothing to avoid.
+        // Backlight config report. The layout is defined by Linux's hid-apple
+        // driver (apple_backlight_config_report) and matches what Apple's own
+        // driver expects:
+        //
+        //   u8  report_id   = 0xBF
+        //   u8  version     = 1      (anything else is rejected)
+        //   u16 backlight_off      (level at which the light turns off)
+        //   u16 backlight_on_min   (smallest on level)
+        //   u16 backlight_on_max   (largest level, sets the slider range)
+        //
+        // All three thresholds are little-endian u16. The previous blob had a
+        // 0x00 first byte, which AppleHIDKeyboard read as version 0 and
+        // rejected with "Unexpected Keyboard Format Report Version 0."
         uint8_t buffer[40];
         memset(buffer, 0, sizeof(buffer));
 
-        const uint8_t blob[] = {0x00, 0x01, 0x00, 0x00, reportedLevel, 0x20, 0x02, 0x00};
+        const uint8_t blob[] = {
+            0xBF,       // report id
+            0x01,       // version
+            0x00, 0x00, // backlight_off (u16 LE)
+            0x00, 0x00, // backlight_on_min (u16 LE)
+            0x20, 0x00, // backlight_on_max (u16 LE) = 32 levels
+        };
         memcpy(buffer, blob, sizeof(blob));
 
         IOByteCount want = report->getLength();
         if (want > sizeof(buffer)) {
             want = sizeof(buffer);
         }
-        if (want >= sizeof(blob)) {
-            report->writeBytes(0, buffer, want);
-        } else {
-            report->writeBytes(0, blob, sizeof(blob));
+        report->writeBytes(0, buffer, want);
+        return kIOReturnSuccess;
+    }
+
+    // Keyboard format report (feature report id 2, read by AppleHIDKeyboard at
+    // start). Serving it with a version byte of 1 stops the "Unexpected
+    // Keyboard Format Report Version 0." log line. The layout beyond that byte
+    // is opaque, so zeros follow.
+    if (report_id == 0x02 && report != nullptr) {
+        uint8_t buffer[40];
+        memset(buffer, 0, sizeof(buffer));
+        buffer[0] = 0x01; // version
+
+        IOByteCount want = report->getLength();
+        if (want > sizeof(buffer)) {
+            want = sizeof(buffer);
         }
+        report->writeBytes(0, buffer, want);
         return kIOReturnSuccess;
     }
 
@@ -197,17 +238,17 @@ IOReturn VirtualAppleKeyboard::setReport(IOMemoryDescriptor *report, IOHIDReport
                   report ? (uint32_t)report->getLength() : 0,
                   "AsusSMCHIDSetLog", setLogBytes, &setLogCount);
 
-    if (report_id == 0xbf && report != nullptr) {
+    if ((report_id == 0xbf || report_id == 0xb0) && report != nullptr) {
         uint8_t buf[40] = {};
         IOByteCount length = report->getLength();
         if (length > sizeof(buf)) {
             length = sizeof(buf);
         }
         if (length > 0 && report->readBytes(0, buf, length) == length) {
-            // Record exactly what macOS sent. The payload layout of this
-            // collection is not documented anywhere, so the first captures
-            // calibrate the mapping rather than guessing it. Built by hand to
-            // avoid pulling printf into this file.
+            // The 0xB0 set report layout, from Linux's hid-apple:
+            //   u8 report_id, u8 version, u16 backlight (LE), u16 rate (LE)
+            // Record it raw so the exact payload macOS sends is visible, and
+            // forward it to the driver.
             static const char hexDigits[] = "0123456789ABCDEF";
             char hex[3 * sizeof(buf)];
             size_t pos = 0;

@@ -766,27 +766,31 @@ void AsusSMC::virtualKeyboardBacklightSink(const uint8_t *bytes, uint32_t length
 }
 
 void AsusSMC::handleVirtualKeyboardBacklight(const uint8_t *bytes, uint32_t length) {
-    if (!bytes || length < 2) {
+    if (!bytes || length < 6) {
         return;
     }
 
-    // Payload layout of the KeyboardBacklight collection is not documented.
-    // Byte 0 is the report id, so the first data byte is the only sane
-    // candidate: taken as-is when it already fits the hardware range,
-    // otherwise scaled from a 0..255 range. The hex dump that setReport
-    // publishes shows the real layout once the slider is used.
-    uint32_t raw = bytes[1];
-    uint8_t level;
-    if (raw <= ASUS_KBD_BACKLIGHT_MAX) {
-        level = (uint8_t)raw;
-    } else {
-        level = (uint8_t)(raw * ASUS_KBD_BACKLIGHT_MAX / 255);
+    // The 0xB0 set report, layout from Linux's hid-apple:
+    //   bytes[0] = report id (0xB0)
+    //   bytes[1] = version   (1)
+    //   bytes[2..3] = backlight level (u16, little-endian)
+    //   bytes[4..5] = rate   (u16, little-endian)
+    //
+    // macOS's range goes 0..0x20 (the maximum we advertise in the config
+    // report), which maps straight onto the hardware levels 0..3 by dividing
+    // by 8 and clamping.
+    uint16_t raw = (uint16_t)(bytes[2] | (bytes[3] << 8));
+
+    uint8_t level = (uint8_t)((raw + 4) / 8);  // round to nearest of 0..3
+    if (level > ASUS_KBD_BACKLIGHT_MAX) {
+        level = ASUS_KBD_BACKLIGHT_MAX;
     }
 
     kbdLevel = level;
     kbdDimmedForDisplay = false;
 
-    VirtualAppleKeyboard::reportedLevel = (uint8_t)(level * 10);
+    // Report back the level on the 0x20 scale the config advertises.
+    VirtualAppleKeyboard::reportedLevel = (uint8_t)(level * 8);
 
     int ret = sendKbdBacklightViaHID(level);
     SYSLOG("kbd", "HID backlight write: level=%u raw=%u (ret=0x%X)",

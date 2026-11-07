@@ -74,7 +74,7 @@
 // into the registry as AsusSMCBuild.
 //
 // Update this string whenever behaviour changes.
-#define kAsusSMCBuildTag "r31-fixedlog"
+#define kAsusSMCBuildTag "r32-appleproto"
 
 
 // Kernel HID device, used for the keyboard backlight feature report. Only a
