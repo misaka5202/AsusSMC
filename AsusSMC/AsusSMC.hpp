@@ -74,7 +74,7 @@
 // into the registry as AsusSMCBuild.
 //
 // Update this string whenever behaviour changes.
-#define kAsusSMCBuildTag "r23-retry"
+#define kAsusSMCBuildTag "r24-pmserialize"
 
 
 // Kernel HID device, used for the keyboard backlight feature report. Only a

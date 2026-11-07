@@ -1419,23 +1419,75 @@ void AsusSMC::followDisplayPower() {
  *  there always returned nothing, while `ioreg -r` shows the value because it
  *  recurses. So the service is searched first, then its children.
  */
+/**
+ *  Read the power state out of an IOPowerManagement property.
+ *
+ *  The probe answered the question that six rounds of polling could not:
+ *
+ *      AsusSMCPowerDiag = wPM=1/IOServicePM/0 pPM=1/IOServicePM/0
+ *
+ *  The property IS there, but its class is IOServicePM, not OSDictionary.
+ *  Casting it to a dictionary was therefore always null, which is why every
+ *  read reported nothing while ioreg happily printed the value.
+ *
+ *  IOServicePM serialises into exactly the dictionary ioreg displays, so that
+ *  is the route used: serialise, parse the result back, then read
+ *  CurrentPowerState from it.
+ */
+static OSDictionary *powerManagementDict(OSObject *obj) {
+    if (!obj) {
+        return nullptr;
+    }
+
+    // The common case: already a plain dictionary.
+    if (OSDictionary *plain = OSDynamicCast(OSDictionary, obj)) {
+        return plain;
+    }
+
+    // IOServicePM (and anything else opaque): go through its serialised form.
+    OSSerialize *s = OSSerialize::withCapacity(4096);
+    if (!s) {
+        return nullptr;
+    }
+
+    OSDictionary *parsed = nullptr;
+    if (obj->serialize(s) && s->getLength() > 0) {
+        OSObject *result = OSUnserializeXML(s->text(), s->getLength());
+        if (result) {
+            parsed = OSDynamicCast(OSDictionary, result);
+            if (parsed) {
+                parsed->retain();
+            }
+            result->release();
+        }
+    }
+    s->release();
+
+    return parsed;
+}
+
 static bool readPowerStateFrom(IOService *svc, uint32_t *state, const char **source) {
     if (!svc) {
         return false;
     }
-    OSDictionary *pm = OSDynamicCast(OSDictionary, svc->getProperty("IOPowerManagement"));
+
+    OSDictionary *pm = powerManagementDict(svc->getProperty("IOPowerManagement"));
     if (!pm) {
         return false;
     }
+
     OSNumber *cur = OSDynamicCast(OSNumber, pm->getObject("CurrentPowerState"));
-    if (!cur) {
-        return false;
+    bool ok = false;
+    if (cur) {
+        *state = cur->unsigned32BitValue();
+        if (source) {
+            *source = svc->getName();
+        }
+        ok = true;
     }
-    *state = cur->unsigned32BitValue();
-    if (source) {
-        *source = svc->getName();
-    }
-    return true;
+
+    pm->release();
+    return ok;
 }
 
 bool AsusSMC::readDisplayWranglerState(uint32_t *state) {
@@ -1595,8 +1647,9 @@ void AsusSMC::probePowerRegistry() {
         if (OSObject *o = wranglerEntry->getProperty("IOPowerManagement")) {
             wPM = true;
             wType = o->getMetaClass()->getClassName();
-            if (OSDictionary *d = OSDynamicCast(OSDictionary, o)) {
+            if (OSDictionary *d = powerManagementDict(o)) {
                 wCur = d->getObject("CurrentPowerState") != nullptr;
+                d->release();
             }
         }
     }
@@ -1604,8 +1657,9 @@ void AsusSMC::probePowerRegistry() {
         if (OSObject *o = panelEntry->getProperty("IOPowerManagement")) {
             pPM = true;
             pType = o->getMetaClass()->getClassName();
-            if (OSDictionary *d = OSDynamicCast(OSDictionary, o)) {
+            if (OSDictionary *d = powerManagementDict(o)) {
                 pCur = d->getObject("CurrentPowerState") != nullptr;
+                d->release();
             }
         }
     }
@@ -1628,11 +1682,15 @@ void AsusSMC::probePowerRegistry() {
             }
             withPM++;
 
-            OSDictionary *d = OSDynamicCast(OSDictionary, o);
+            OSDictionary *d = powerManagementDict(o);
             if (!d || !d->getObject("CurrentPowerState")) {
+                if (d) {
+                    d->release();
+                }
                 continue;
             }
             withCur++;
+            d->release();
 
             if (firstCurName[0] == '-') {
                 const char *n = svc->getName();
