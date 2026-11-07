@@ -153,6 +153,14 @@ static IOPMPowerState powerStates[kPowerStateCount] = {
 };
 
 IOReturn AsusSMC::setPowerState(unsigned long powerStateOrdinal, IOService *whatDevice) {
+    // Guard added upstream in v1.2.3 ("Correct usage of powerStateOrdinal in
+    // setPowerState"). setPowerState is also delivered for other devices in
+    // the power tree; without this check an unrelated transition would blink
+    // the keyboard. PR #62 as originally merged lacked it.
+    if (whatDevice != this) {
+        return kIOPMAckImplied;
+    }
+
     if (powerStateOrdinal == kPowerStateOff) {
         // Sleep, shutdown or reboot. Blanking here is what keeps the keyboard
         // from glowing through the night.

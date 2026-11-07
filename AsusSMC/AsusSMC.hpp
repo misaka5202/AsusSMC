@@ -74,7 +74,7 @@
 // into the registry as AsusSMCBuild.
 //
 // Update this string whenever behaviour changes.
-#define kAsusSMCBuildTag "r20-pmsleep-hidset"
+#define kAsusSMCBuildTag "r21-pmguard"
 
 
 // Kernel HID device, used for the keyboard backlight feature report. Only a
