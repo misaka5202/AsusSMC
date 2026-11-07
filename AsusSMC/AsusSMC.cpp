@@ -77,7 +77,22 @@ bool AsusSMC::start(IOService *provider) {
 
     initBattery();
 
-    initVirtualKeyboard();
+    // Version badge. Every diagnostic below is worthless without knowing which
+    // build produced it: a boot that silently kept an older kext read exactly
+    // like a failed experiment twice already. Bump kAsusSMCBuildTag whenever
+    // behaviour changes and check it with
+    //   ioreg -rn AsusSMC -l | grep AsusSMCBuild
+    setProperty("AsusSMCBuild", kAsusSMCBuildTag);
+
+    // VirtualAppleKeyboard publishes an Apple Vendor KeyboardBacklight
+    // collection (usage page 0xFF00, usage 0x0F, report id 191), which is what
+    // makes System Settings show the keyboard brightness panel at all. -asussmcnokbd
+    // leaves it out, so the panel source can be confirmed in one boot.
+    if (!checkKernelArgument("-asussmcnokbd")) {
+        initVirtualKeyboard();
+    } else {
+        setProperty("AsusSMCVirtualKeyboard", "disabled by boot-arg");
+    }
 
     startATKDevice();
 

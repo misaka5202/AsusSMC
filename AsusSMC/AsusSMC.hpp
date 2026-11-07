@@ -66,6 +66,17 @@
 
 #define AsusSMCEventCode 0x8102
 
+// Build identification.
+//
+// Diagnostics that depend on knowing exactly which binary is running: a boot
+// that silently kept an older kext is indistinguishable from a failed
+// experiment, and two rounds were lost that way. Every build now stamps a tag
+// into the registry as AsusSMCBuild.
+//
+// Update this string whenever behaviour changes.
+#define kAsusSMCBuildTag "r18-hidprobe"
+
+
 // Kernel HID device, used for the keyboard backlight feature report. Only a
 // pointer is stored here, so a forward declaration is enough.
 class IOHIDDevice;
